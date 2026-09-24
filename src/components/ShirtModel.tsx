@@ -1,5 +1,5 @@
 import { useCursor, useGLTF, useTexture } from '@react-three/drei'
-import { useThree, type ThreeEvent } from '@react-three/fiber'
+import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import {
   useEffect,
   useLayoutEffect,
@@ -10,10 +10,22 @@ import {
   type RefObject,
 } from 'react'
 import * as THREE from 'three'
+import {
+  acceleratedRaycast,
+  computeBoundsTree,
+  disposeBoundsTree,
+} from 'three-mesh-bvh'
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import straightUrl from '../assets/crewneck-straight-cut-short-sleeve-t-shirt-3d-model-b42a1ab90447.glb?url'
 import relaxedUrl from '../assets/relaxed-crewneck-drop-shoulder-elbow-sleeve-t-shirt-3d-model-b2e6febd66e6.glb?url'
 import { useMockupStore, type Graphic, type ShirtId } from '../store/useMockupStore'
+
+// Accelerate all Mesh raycasts via BVH (huge win on ~300k-tri shirts).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const GeomProto = THREE.BufferGeometry.prototype as any
+GeomProto.computeBoundsTree = computeBoundsTree
+GeomProto.disposeBoundsTree = disposeBoundsTree
+THREE.Mesh.prototype.raycast = acceleratedRaycast
 
 const SHIRT_URLS: Record<ShirtId, string> = {
   straight: straightUrl,
@@ -33,8 +45,8 @@ const PROJECTOR_PULL = 0.22
 const DRAG_LIFT = 0.045
 /** Final wrap quality (segments). 6 → 7×7 = 49 verts. */
 const PATCH_RES = 6
-/** Coarse samples while dragging (3 → 3×3 = 9 rays). */
-const DRAFT_SAMPLES = 3
+/** Live-drag samples with BVH (4 → 4×4 = 16 rays). */
+const DRAFT_SAMPLES = 4
 
 const _local = new THREE.Vector3()
 const _normal = new THREE.Vector3()
@@ -51,8 +63,34 @@ const _tmp = new THREE.Vector3()
 const _hitPoint = new THREE.Vector3()
 const _dragPlane = new THREE.Plane()
 const _raycaster = new THREE.Raycaster()
+/** Prefer first hit — BVH supports this and skips the rest of the tree. */
+const _bvhRay = _raycaster as THREE.Raycaster & { firstHitOnly?: boolean }
+_bvhRay.firstHitOnly = true
 /** Scratch buffer for draft bilinear samples (max DRAFT_SAMPLES² × 3). */
 const _draftSamples = new Float32Array(DRAFT_SAMPLES * DRAFT_SAMPLES * 3)
+
+/** Live drag pose — updated without React; committed to Zustand on release. */
+export type DragLiveState = {
+  active: boolean
+  graphicId: string | null
+  position: { x: number; y: number; z: number }
+  side: 'front' | 'back'
+  scale: number
+  rotation: number
+  needsProject: boolean
+}
+
+function createDragLiveState(): DragLiveState {
+  return {
+    active: false,
+    graphicId: null,
+    position: { x: 0, y: 0, z: 0 },
+    side: 'front',
+    scale: 0.35,
+    rotation: 0,
+    needsProject: false,
+  }
+}
 
 function simplifyMaterial(_source: THREE.Material) {
   return new THREE.MeshLambertMaterial({
@@ -72,6 +110,18 @@ function fitToUnitSize(root: THREE.Object3D) {
   const fitted = new THREE.Box3().setFromObject(root)
   const center = fitted.getCenter(new THREE.Vector3())
   root.position.sub(center)
+}
+
+function accelerateShirtMeshes(root: THREE.Object3D) {
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh
+    if (!mesh.isMesh || !mesh.geometry) return
+    const geo = mesh.geometry as THREE.BufferGeometry & {
+      boundsTree?: unknown
+      computeBoundsTree?: () => void
+    }
+    if (!geo.boundsTree) geo.computeBoundsTree?.()
+  })
 }
 
 function getBodyMeshes(root: THREE.Object3D) {
@@ -111,38 +161,34 @@ function placeFromHit(
   }
 }
 
+type ProjectPose = Pick<
+  Graphic,
+  'position' | 'scale' | 'rotation' | 'side'
+>
+
 /**
- * Project the graphic in the surface tangent plane so:
- * - size stays constant (no blow-up on the torso)
- * - the patch wraps around fabric curvature
- * Vertices are written in `parent` local space; mesh transform must stay identity.
- *
- * `draft: true` — few tangent samples + bilinear fill (fast enough for live drag).
- * `draft: false` — raycast every vertex (final quality on release / idle).
+ * Project the graphic in the surface tangent plane.
+ * `draft: true` — coarse samples + bilinear (live drag).
+ * `draft: false` — every vertex (release / idle).
  */
 function projectPatchOntoShirt(
   geometry: THREE.PlaneGeometry,
   parent: THREE.Object3D,
   bodyMeshes: THREE.Mesh[],
-  graphic: Graphic,
+  pose: ProjectPose,
   opts: { draft?: boolean } = {},
 ) {
   if (!bodyMeshes.length) return
 
   const draft = !!opts.draft
   parent.updateMatrixWorld(true)
-  // One mesh while dragging; full set when settling.
   const targets = draft ? bodyMeshes.slice(0, 1) : bodyMeshes
-  const fromFront = graphic.side === 'front'
+  const fromFront = pose.side === 'front'
   const lift = draft ? LAYER_EPS * 2.2 : LAYER_EPS
+  _bvhRay.firstHitOnly = true
 
-  // 1) Resolve center + normal on the fabric
   _origin
-    .set(
-      graphic.position.x,
-      graphic.position.y,
-      fromFront ? 1.5 : -1.5,
-    )
+    .set(pose.position.x, pose.position.y, fromFront ? 1.5 : -1.5)
     .applyMatrix4(parent.matrixWorld)
   _dir
     .set(0, 0, fromFront ? -1 : 1)
@@ -162,7 +208,6 @@ function projectPatchOntoShirt(
   if (fromFront && _normal.z < 0) _normal.negate()
   if (!fromFront && _normal.z > 0) _normal.negate()
 
-  // 2) Tangent basis on the surface (world space), then rotate by graphic.rotation
   _tangent.crossVectors(_up, _normal)
   if (_tangent.lengthSq() < 1e-6) {
     _tangent.set(1, 0, 0).cross(_normal)
@@ -170,11 +215,11 @@ function projectPatchOntoShirt(
   _tangent.normalize()
   _bitangent.crossVectors(_normal, _tangent).normalize()
 
-  _quat.setFromAxisAngle(_normal, graphic.rotation)
+  _quat.setFromAxisAngle(_normal, pose.rotation)
   _tangent.applyQuaternion(_quat)
   _bitangent.applyQuaternion(_quat)
 
-  const size = graphic.scale
+  const size = pose.scale
   const pos = geometry.attributes.position
   const uv = geometry.attributes.uv
 
@@ -203,7 +248,6 @@ function projectPatchOntoShirt(
   let hits = 0
 
   if (draft) {
-    // Coarse NxN raycasts, then bilinear upsample onto every vertex.
     const n = DRAFT_SAMPLES
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
@@ -230,23 +274,21 @@ function projectPatchOntoShirt(
       const i01 = ((j0 + 1) * n + i0) * 3
       const i11 = ((j0 + 1) * n + i0 + 1) * 3
 
-      const x =
+      pos.setXYZ(
+        vi,
         (1 - fx) * (1 - fy) * _draftSamples[i00] +
-        fx * (1 - fy) * _draftSamples[i10] +
-        (1 - fx) * fy * _draftSamples[i01] +
-        fx * fy * _draftSamples[i11]
-      const y =
+          fx * (1 - fy) * _draftSamples[i10] +
+          (1 - fx) * fy * _draftSamples[i01] +
+          fx * fy * _draftSamples[i11],
         (1 - fx) * (1 - fy) * _draftSamples[i00 + 1] +
-        fx * (1 - fy) * _draftSamples[i10 + 1] +
-        (1 - fx) * fy * _draftSamples[i01 + 1] +
-        fx * fy * _draftSamples[i11 + 1]
-      const z =
+          fx * (1 - fy) * _draftSamples[i10 + 1] +
+          (1 - fx) * fy * _draftSamples[i01 + 1] +
+          fx * fy * _draftSamples[i11 + 1],
         (1 - fx) * (1 - fy) * _draftSamples[i00 + 2] +
-        fx * (1 - fy) * _draftSamples[i10 + 2] +
-        (1 - fx) * fy * _draftSamples[i01 + 2] +
-        fx * fy * _draftSamples[i11 + 2]
-
-      pos.setXYZ(vi, x, y, z)
+          fx * (1 - fy) * _draftSamples[i10 + 2] +
+          (1 - fx) * fy * _draftSamples[i01 + 2] +
+          fx * fy * _draftSamples[i11 + 2],
+      )
     }
   } else {
     for (let i = 0; i < pos.count; i++) {
@@ -258,9 +300,7 @@ function projectPatchOntoShirt(
   }
 
   pos.needsUpdate = true
-  if (!draft) {
-    geometry.computeVertexNormals()
-  }
+  if (!draft) geometry.computeVertexNormals()
   geometry.computeBoundingSphere()
   geometry.computeBoundingBox()
 
@@ -270,9 +310,9 @@ function projectPatchOntoShirt(
       const v = uv.getY(i) - 0.5
       pos.setXYZ(
         i,
-        graphic.position.x + u * size,
-        graphic.position.y + v * size,
-        graphic.position.z,
+        pose.position.x + u * size,
+        pose.position.y + v * size,
+        pose.position.z,
       )
     }
     pos.needsUpdate = true
@@ -287,12 +327,14 @@ function GraphicLayer({
   isActive,
   shirtRoot,
   groupRef,
+  dragLiveRef,
   onDragStart,
 }: {
   graphic: Graphic
   isActive: boolean
   shirtRoot: THREE.Object3D
   groupRef: RefObject<THREE.Group | null>
+  dragLiveRef: MutableRefObject<DragLiveState>
   onDragStart: (id: string, clientX: number, clientY: number) => void
 }) {
   const texture = useTexture(graphic.url)
@@ -302,6 +344,7 @@ function GraphicLayer({
   useCursor(hovered, 'grab', 'auto')
 
   const meshRef = useRef<THREE.Mesh>(null)
+  const handleRef = useRef<THREE.Mesh>(null)
   const matRef = useRef<THREE.MeshBasicMaterial>(null)
 
   const geometry = useMemo(
@@ -323,36 +366,49 @@ function GraphicLayer({
 
   const draggingThis = isDraggingGraphic && isActive
 
-  // Live wrap while dragging — coarse samples only (keeps UI responsive)
-  useLayoutEffect(() => {
+  // Live wrap in the render loop — no React re-render per pointer move
+  useFrame(() => {
+    const live = dragLiveRef.current
+    if (!live.active || live.graphicId !== graphic.id) return
+    if (!live.needsProject) return
+    live.needsProject = false
+
     const mesh = meshRef.current
     const parent = groupRef.current
-    if (!mesh || !parent || !draggingThis) return
+    const handle = handleRef.current
+    if (!mesh || !parent) return
 
     mesh.position.set(0, 0, 0)
     mesh.rotation.set(0, 0, 0)
     mesh.scale.set(1, 1, 1)
     if (matRef.current) matRef.current.depthTest = false
-    projectPatchOntoShirt(geometry, parent, bodyMeshes, graphic, {
-      draft: true,
-    })
-    invalidate()
-  }, [
-    draggingThis,
-    graphic.position.x,
-    graphic.position.y,
-    graphic.position.z,
-    graphic.scale,
-    graphic.rotation,
-    graphic.side,
-    graphic,
-    bodyMeshes,
-    geometry,
-    groupRef,
-    invalidate,
-  ])
 
-  // Idle / on release: full-quality wrap
+    if (handle) {
+      const lift = live.side === 'front' ? DRAG_LIFT : -DRAG_LIFT
+      handle.position.set(
+        live.position.x,
+        live.position.y,
+        live.position.z + lift,
+      )
+      handle.rotation.set(0, live.side === 'front' ? 0 : Math.PI, live.rotation)
+      handle.scale.setScalar(Math.max(live.scale, 0.2) * 1.5)
+    }
+
+    projectPatchOntoShirt(
+      geometry,
+      parent,
+      bodyMeshes,
+      {
+        position: live.position,
+        scale: live.scale,
+        rotation: live.rotation,
+        side: live.side,
+      },
+      { draft: true },
+    )
+  })
+
+  // Idle / after release: full-quality wrap from store pose
   useLayoutEffect(() => {
     if (isDraggingGraphic) return
 
@@ -389,12 +445,13 @@ function GraphicLayer({
 
   return (
     <group>
-      {/* Grab handle — always hittable, follows stored center */}
       <mesh
+        ref={handleRef}
         position={[
           graphic.position.x,
           graphic.position.y,
-          graphic.position.z + (graphic.side === 'front' ? DRAG_LIFT : -DRAG_LIFT),
+          graphic.position.z +
+            (graphic.side === 'front' ? DRAG_LIFT : -DRAG_LIFT),
         ]}
         rotation={[0, graphic.side === 'front' ? 0 : Math.PI, graphic.rotation]}
         scale={Math.max(graphic.scale, 0.2) * 1.5}
@@ -457,10 +514,12 @@ function DragSystem({
   groupRef,
   shirtRoot,
   dragApiRef,
+  dragLiveRef,
 }: {
   groupRef: RefObject<THREE.Group | null>
   shirtRoot: THREE.Object3D
   dragApiRef: MutableRefObject<DragApi | null>
+  dragLiveRef: MutableRefObject<DragLiveState>
 }) {
   const { camera, gl, invalidate, controls } = useThree()
   const setIsDraggingGraphic = useMockupStore((s) => s.setIsDraggingGraphic)
@@ -468,7 +527,6 @@ function DragSystem({
   const updateActiveGraphic = useMockupStore((s) => s.updateActiveGraphic)
   const dragging = useRef(false)
   const lockedSide = useRef<'front' | 'back' | null>(null)
-  const moveRaf = useRef(0)
   const pending = useRef<{ x: number; y: number } | null>(null)
 
   const shirtMeshes = useMemo(() => getBodyMeshes(shirtRoot), [shirtRoot])
@@ -478,24 +536,23 @@ function DragSystem({
     if (orbit && typeof orbit.enabled === 'boolean') orbit.enabled = enabled
   }
 
-  const applyHit = (clientX: number, clientY: number) => {
+  /** Write hit into live ref only — no Zustand until pointerup. */
+  const applyHitLive = (clientX: number, clientY: number) => {
     const parent = groupRef.current
-    if (!parent || !shirtMeshes.length) return
-
-    const state = useMockupStore.getState()
-    const active = state.graphics.find((g) => g.id === state.activeGraphicId)
-    if (!active) return
+    const live = dragLiveRef.current
+    if (!parent || !shirtMeshes.length || !live.graphicId) return
 
     const rect = gl.domElement.getBoundingClientRect()
     _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1
     _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1
     _raycaster.setFromCamera(_ndc, camera)
+    // Need all hits so we can prefer the locked side (front/back).
+    _bvhRay.firstHitOnly = false
 
-    // Raycast every visible shirt mesh (sleeves, torso, etc.)
     const hits = _raycaster.intersectObjects(shirtMeshes, false)
-    const prefer = lockedSide.current ?? active.side
+    const prefer = lockedSide.current ?? live.side
 
-    let hit =
+    const hit =
       hits.find((h) => {
         if (!h.face) return false
         _normal
@@ -509,20 +566,18 @@ function DragSystem({
       const placed = placeFromHit(hit, parent)
       if (placed) {
         if (!lockedSide.current) lockedSide.current = placed.side
-        updateActiveGraphic({
-          position: placed.position,
-          side: lockedSide.current,
-        })
-        invalidate()
+        live.position.x = placed.position.x
+        live.position.y = placed.position.y
+        live.position.z = placed.position.z
+        live.side = lockedSide.current
+        live.needsProject = true
         return
       }
     }
 
-    // Fallback: keep following the pointer on a plane at the graphic depth
-    // so the image never "sticks" when the ray misses fabric for a frame.
     parent.updateMatrixWorld(true)
     _center
-      .set(active.position.x, active.position.y, active.position.z)
+      .set(live.position.x, live.position.y, live.position.z)
       .applyMatrix4(parent.matrixWorld)
     _normal
       .set(0, 0, prefer === 'front' ? 1 : -1)
@@ -534,37 +589,46 @@ function DragSystem({
 
     parent.worldToLocal(_local.copy(_hitPoint))
     if (!lockedSide.current) lockedSide.current = prefer
-    updateActiveGraphic({
-      position: {
-        x: _local.x,
-        y: _local.y,
-        z: active.position.z,
-      },
-      side: lockedSide.current,
-    })
-    invalidate()
+    live.position.x = _local.x
+    live.position.y = _local.y
+    live.side = lockedSide.current
+    live.needsProject = true
   }
 
-  const queueHit = (clientX: number, clientY: number) => {
-    pending.current = { x: clientX, y: clientY }
-    if (moveRaf.current) return
-    moveRaf.current = requestAnimationFrame(() => {
-      moveRaf.current = 0
-      const p = pending.current
-      pending.current = null
-      if (p) applyHit(p.x, p.y)
-    })
-  }
+  // One placement resolve + invalidate per frame while dragging
+  useFrame(() => {
+    if (!dragging.current || !pending.current) return
+    const p = pending.current
+    pending.current = null
+    applyHitLive(p.x, p.y)
+    invalidate()
+  })
 
   const beginDrag = (clientX?: number, clientY?: number) => {
+    const state = useMockupStore.getState()
+    const active = state.graphics.find((g) => g.id === state.activeGraphicId)
+    if (!active) return
+
+    const live = dragLiveRef.current
+    live.active = true
+    live.graphicId = active.id
+    live.position.x = active.position.x
+    live.position.y = active.position.y
+    live.position.z = active.position.z
+    live.side = active.side
+    live.scale = active.scale
+    live.rotation = active.rotation
+    live.needsProject = true
+
     dragging.current = true
-    lockedSide.current =
-      useMockupStore.getState().graphics.find(
-        (g) => g.id === useMockupStore.getState().activeGraphicId,
-      )?.side ?? 'front'
+    lockedSide.current = active.side
     setIsDraggingGraphic(true)
     setOrbitEnabled(false)
-    if (clientX != null && clientY != null) applyHit(clientX, clientY)
+
+    if (clientX != null && clientY != null) {
+      pending.current = { x: clientX, y: clientY }
+    }
+    invalidate()
   }
 
   useLayoutEffect(() => {
@@ -587,23 +651,37 @@ function DragSystem({
     const onMove = (e: PointerEvent) => {
       if (!dragging.current) return
       e.preventDefault()
-      queueHit(e.clientX, e.clientY)
+      pending.current = { x: e.clientX, y: e.clientY }
+      invalidate()
     }
 
     const onUp = () => {
       if (!dragging.current) return
       dragging.current = false
-      lockedSide.current = null
-      if (moveRaf.current) {
-        cancelAnimationFrame(moveRaf.current)
-        moveRaf.current = 0
-      }
+
       if (pending.current) {
-        applyHit(pending.current.x, pending.current.y)
+        applyHitLive(pending.current.x, pending.current.y)
         pending.current = null
       }
+
+      const live = dragLiveRef.current
+      updateActiveGraphic({
+        position: {
+          x: live.position.x,
+          y: live.position.y,
+          z: live.position.z,
+        },
+        side: live.side,
+      })
+
+      live.active = false
+      live.graphicId = null
+      live.needsProject = false
+      lockedSide.current = null
+
       setIsDraggingGraphic(false)
       setOrbitEnabled(true)
+      invalidate()
     }
 
     canvas.addEventListener('pointermove', onMove, { passive: false })
@@ -613,7 +691,6 @@ function DragSystem({
       canvas.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
-      if (moveRaf.current) cancelAnimationFrame(moveRaf.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camera, gl, shirtMeshes, controls])
@@ -629,6 +706,7 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
   const activeGraphicId = useMockupStore((s) => s.activeGraphicId)
   const groupRef = useRef<THREE.Group>(null)
   const dragApiRef = useRef<DragApi | null>(null)
+  const dragLiveRef = useRef<DragLiveState>(createDragLiveState())
 
   const cloned = useMemo(() => {
     const root = cloneSkinned(scene)
@@ -648,12 +726,15 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
       mesh.frustumCulled = true
       mesh.userData.isShirt = true
 
-      const sources = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      const sources = Array.isArray(mesh.material)
+        ? mesh.material
+        : [mesh.material]
       const mats = sources.map((m) => simplifyMaterial(m))
       mesh.material = Array.isArray(mesh.material) ? mats : mats[0]
     })
 
     fitToUnitSize(root)
+    accelerateShirtMeshes(root)
     return root
   }, [scene, shirtId])
 
@@ -662,7 +743,9 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
     cloned.traverse((child) => {
       const mesh = child as THREE.Mesh
       if (!mesh.isMesh || !mesh.visible) return
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      const mats = Array.isArray(mesh.material)
+        ? mesh.material
+        : [mesh.material]
       for (const mat of mats) {
         const std = mat as THREE.MeshLambertMaterial
         if (std?.color) std.color.copy(tint)
@@ -682,6 +765,7 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
         groupRef={groupRef}
         shirtRoot={cloned}
         dragApiRef={dragApiRef}
+        dragLiveRef={dragLiveRef}
       />
       {graphics.map((graphic) => (
         <GraphicLayer
@@ -690,6 +774,7 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
           isActive={graphic.id === activeGraphicId}
           shirtRoot={cloned}
           groupRef={groupRef}
+          dragLiveRef={dragLiveRef}
           onDragStart={(id, x, y) => dragApiRef.current?.startDrag(id, x, y)}
         />
       ))}
