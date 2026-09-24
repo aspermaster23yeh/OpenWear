@@ -28,9 +28,10 @@ const HIDDEN_MESHES: Partial<Record<ShirtId, string[]>> = {
 
 const TARGET_SIZE = 1.15
 const LAYER_EPS = 0.0035
-/** Projector starts this far along the normal before casting back onto fabric. */
 const PROJECTOR_PULL = 0.22
-const PATCH_RES = 8
+/** Extra Z while dragging flat preview so it stays above the fabric. */
+const DRAG_LIFT = 0.045
+const PATCH_RES = 6
 
 const _local = new THREE.Vector3()
 const _normal = new THREE.Vector3()
@@ -219,6 +220,18 @@ function projectPatchOntoShirt(
   }
 }
 
+function resetFlatPlane(geometry: THREE.PlaneGeometry) {
+  const pos = geometry.attributes.position
+  const uv = geometry.attributes.uv
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(i, uv.getX(i) - 0.5, uv.getY(i) - 0.5, 0)
+  }
+  pos.needsUpdate = true
+  geometry.computeVertexNormals()
+  geometry.computeBoundingSphere()
+  geometry.computeBoundingBox()
+}
+
 function GraphicLayer({
   graphic,
   isActive,
@@ -239,7 +252,7 @@ function GraphicLayer({
   useCursor(hovered, 'grab', 'auto')
 
   const meshRef = useRef<THREE.Mesh>(null)
-  const rafRef = useRef(0)
+  const matRef = useRef<THREE.MeshBasicMaterial>(null)
 
   const geometry = useMemo(
     () => new THREE.PlaneGeometry(1, 1, PATCH_RES, PATCH_RES),
@@ -258,28 +271,60 @@ function GraphicLayer({
     texture.needsUpdate = true
   }, [texture])
 
-  // Always the same projection path (real-time while dragging, throttled via rAF)
+  const draggingThis = isDraggingGraphic && isActive
+
+  // Drag: light flat preview only (NO multi-raycast — that froze the app)
   useLayoutEffect(() => {
+    const mesh = meshRef.current
+    if (!mesh || !draggingThis) return
+
+    resetFlatPlane(geometry)
+    const lift = graphic.side === 'front' ? DRAG_LIFT : -DRAG_LIFT
+    mesh.position.set(
+      graphic.position.x,
+      graphic.position.y,
+      graphic.position.z + lift,
+    )
+    mesh.rotation.set(
+      0,
+      graphic.side === 'front' ? 0 : Math.PI,
+      graphic.rotation,
+    )
+    mesh.scale.setScalar(graphic.scale)
+    if (matRef.current) matRef.current.depthTest = false
+    invalidate()
+  }, [
+    draggingThis,
+    graphic.position.x,
+    graphic.position.y,
+    graphic.position.z,
+    graphic.scale,
+    graphic.rotation,
+    graphic.side,
+    geometry,
+    invalidate,
+  ])
+
+  // Idle: project once onto curvature (heavy — only when not dragging)
+  useLayoutEffect(() => {
+    if (isDraggingGraphic) return
+
     const mesh = meshRef.current
     const parent = groupRef.current
     if (!mesh || !parent) return
 
-    // Only the active graphic reprojects every drag move; others wait until idle
-    if (isDraggingGraphic && !isActive) return
-
-    cancelAnimationFrame(rafRef.current)
-    rafRef.current = requestAnimationFrame(() => {
+    const t = window.setTimeout(() => {
       mesh.position.set(0, 0, 0)
       mesh.rotation.set(0, 0, 0)
       mesh.scale.set(1, 1, 1)
+      if (matRef.current) matRef.current.depthTest = true
       projectPatchOntoShirt(geometry, parent, bodyMeshes, graphic)
       invalidate()
-    })
+    }, 16)
 
-    return () => cancelAnimationFrame(rafRef.current)
+    return () => window.clearTimeout(t)
   }, [
     isDraggingGraphic,
-    isActive,
     graphic.position.x,
     graphic.position.y,
     graphic.position.z,
@@ -295,11 +340,15 @@ function GraphicLayer({
 
   return (
     <group>
-      {/* Grab handle — invisible but raycastable (visible=false skips hits in Three.js) */}
+      {/* Grab handle — always hittable, follows stored center */}
       <mesh
-        position={[graphic.position.x, graphic.position.y, graphic.position.z]}
+        position={[
+          graphic.position.x,
+          graphic.position.y,
+          graphic.position.z + (graphic.side === 'front' ? DRAG_LIFT : -DRAG_LIFT),
+        ]}
         rotation={[0, graphic.side === 'front' ? 0 : Math.PI, graphic.rotation]}
-        scale={Math.max(graphic.scale, 0.12) * 1.25}
+        scale={Math.max(graphic.scale, 0.15) * 1.3}
         renderOrder={21}
         onPointerOver={(e) => {
           e.stopPropagation()
@@ -308,6 +357,9 @@ function GraphicLayer({
         onPointerOut={() => setHovered(false)}
         onPointerDown={(e: ThreeEvent<PointerEvent>) => {
           e.stopPropagation()
+          ;(e.nativeEvent.target as HTMLElement | null)?.setPointerCapture?.(
+            e.pointerId,
+          )
           onDragStart(graphic.id)
         }}
       >
@@ -327,13 +379,13 @@ function GraphicLayer({
         userData={{ graphicId: graphic.id }}
         renderOrder={20}
         frustumCulled={false}
-        // Visual only — dragging uses the handle above
         raycast={() => undefined}
       >
         <meshBasicMaterial
+          ref={matRef}
           map={texture}
           transparent
-          depthTest
+          depthTest={!draggingThis}
           depthWrite={false}
           polygonOffset
           polygonOffsetFactor={-8}
@@ -366,12 +418,14 @@ function DragSystem({
   const selectGraphic = useMockupStore((s) => s.selectGraphic)
   const updateActiveGraphic = useMockupStore((s) => s.updateActiveGraphic)
   const dragging = useRef(false)
+  const moveRaf = useRef(0)
+  const pending = useRef<{ x: number; y: number } | null>(null)
 
   const shirtMeshes = useMemo(() => getBodyMeshes(shirtRoot), [shirtRoot])
 
   const applyHit = (clientX: number, clientY: number) => {
     const parent = groupRef.current
-    if (!parent) return
+    if (!parent || !shirtMeshes.length) return
 
     const rect = gl.domElement.getBoundingClientRect()
     _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1
@@ -385,6 +439,17 @@ function DragSystem({
     if (!placed) return
     updateActiveGraphic({ position: placed.position, side: placed.side })
     invalidate()
+  }
+
+  const queueHit = (clientX: number, clientY: number) => {
+    pending.current = { x: clientX, y: clientY }
+    if (moveRaf.current) return
+    moveRaf.current = requestAnimationFrame(() => {
+      moveRaf.current = 0
+      const p = pending.current
+      pending.current = null
+      if (p) applyHit(p.x, p.y)
+    })
   }
 
   useLayoutEffect(() => {
@@ -409,22 +474,32 @@ function DragSystem({
 
     const onMove = (e: PointerEvent) => {
       if (!dragging.current) return
-      applyHit(e.clientX, e.clientY)
+      queueHit(e.clientX, e.clientY)
     }
 
     const onUp = () => {
       if (!dragging.current) return
       dragging.current = false
+      if (moveRaf.current) {
+        cancelAnimationFrame(moveRaf.current)
+        moveRaf.current = 0
+      }
+      // Flush last pending hit before projecting on release
+      if (pending.current) {
+        applyHit(pending.current.x, pending.current.y)
+        pending.current = null
+      }
       setIsDraggingGraphic(false)
     }
 
-    canvas.addEventListener('pointermove', onMove)
+    canvas.addEventListener('pointermove', onMove, { passive: true })
     window.addEventListener('pointerup', onUp)
     window.addEventListener('pointercancel', onUp)
     return () => {
       canvas.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
+      if (moveRaf.current) cancelAnimationFrame(moveRaf.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camera, gl, shirtMeshes])
