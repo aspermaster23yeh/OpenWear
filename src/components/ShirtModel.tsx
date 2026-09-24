@@ -17,9 +17,11 @@ const HIDDEN_MESHES: Partial<Record<ShirtId, string[]>> = {
   straight: ['REBUILD_Tonal_Double_Stitch'],
 }
 
+// Plane must sit in front of the fitted chest (~0.24–0.30). Values below that
+// bury the graphic inside the mesh so depth-test hides it completely.
 const LOGO_Z: Record<ShirtId, number> = {
-  straight: 0.095,
-  relaxed: 0.11,
+  straight: 0.42,
+  relaxed: 0.45,
 }
 
 const MAX_TEX_SIZE = 1024
@@ -163,12 +165,21 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
   return (
     <group>
       <primitive object={cloned} />
-      <mesh position={logoPos} rotation={logoRot} scale={logoScale} renderOrder={2}>
+      <mesh
+        position={logoPos}
+        rotation={logoRot}
+        scale={logoScale}
+        renderOrder={10}
+        frustumCulled={false}
+      >
         <planeGeometry args={[1, 1]} />
         <meshBasicMaterial
           map={logoTexture}
           transparent
           depthWrite={false}
+          polygonOffset
+          polygonOffsetFactor={-2}
+          polygonOffsetUnits={-2}
           toneMapped={false}
           side={THREE.DoubleSide}
         />

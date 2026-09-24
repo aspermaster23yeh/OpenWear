@@ -1,13 +1,13 @@
 @import 'tailwindcss';
 
 @theme {
-  --font-sans: 'Segoe UI', 'Helvetica Neue', ui-sans-serif, system-ui, sans-serif;
-  --font-display: 'Segoe UI', 'Helvetica Neue', ui-sans-serif, system-ui, sans-serif;
-  --color-ink: #0f1218;
-  --color-panel: rgba(18, 22, 30, 0.72);
-  --color-panel-border: rgba(255, 255, 255, 0.08);
-  --color-accent: #e8a87c;
-  --color-muted: #9aa3b2;
+  --font-sans: 'Archivo', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Bebas Neue', 'Anton', Impact, sans-serif;
+  --color-ink: #070708;
+  --color-panel: rgba(12, 12, 14, 0.82);
+  --color-panel-border: rgba(255, 255, 255, 0.1);
+  --color-accent: #c8f542;
+  --color-muted: #8b8f98;
 }
 
 * {
@@ -21,16 +21,20 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #0b0d12;
+  background: var(--studio-bg, #0b0d12);
   color: #f4f6f8;
   font-family: var(--font-sans);
 }
 
 body {
-  background:
-    radial-gradient(ellipse 80% 60% at 20% 10%, rgba(232, 168, 124, 0.12), transparent 55%),
-    radial-gradient(ellipse 70% 50% at 85% 80%, rgba(90, 120, 180, 0.14), transparent 50%),
-    linear-gradient(160deg, #0b0d12 0%, #12161f 48%, #0e1118 100%);
+  background: var(--studio-bg, #0b0d12);
+  transition: background-color 280ms ease;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 input[type='range'] {
@@ -49,10 +53,10 @@ input[type='range']::-webkit-slider-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #e8a87c;
+  background: #c8f542;
   cursor: pointer;
-  border: 2px solid #1a1f2a;
-  box-shadow: 0 0 0 1px rgba(232, 168, 124, 0.35);
+  border: 2px solid #0c0c0e;
+  box-shadow: 0 0 0 1px rgba(200, 245, 66, 0.35);
 }
 
 input[type='color'] {

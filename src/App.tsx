@@ -5,14 +5,16 @@ import { useMockupStore } from './store/useMockupStore'
 
 function ViewportLoader() {
   return (
-    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-[#0b0d12]">
+    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-[var(--studio-bg,#0b0d12)]">
       <div className="relative h-14 w-14">
-        <div className="absolute inset-0 animate-spin rounded-full border-2 border-white/10 border-t-[#e8a87c]" />
+        <div className="absolute inset-0 animate-spin rounded-full border-2 border-white/10 border-t-[#c8f542]" />
         <div className="absolute inset-2 rounded-full bg-white/5" />
       </div>
       <div className="text-center">
-        <p className="text-sm font-medium text-white/80">Cargando estudio 3D</p>
-        <p className="mt-1 text-xs text-white/35">Preparando modelo y entorno…</p>
+        <p className="font-display text-2xl tracking-[0.14em] text-white/90">OPENWEAR</p>
+        <p className="mt-1 text-[10px] uppercase tracking-[0.28em] text-white/35">
+          Loading studio…
+        </p>
       </div>
     </div>
   )

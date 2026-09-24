@@ -10,6 +10,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   forwardRef,
   type RefObject,
@@ -42,12 +43,12 @@ function LoaderFallback() {
     <Html center>
       <div className="flex flex-col items-center gap-3 rounded-2xl border border-white/10 bg-[#12161e]/90 px-8 py-7 shadow-2xl backdrop-blur-md">
         <div className="relative h-12 w-12">
-          <div className="absolute inset-0 animate-spin rounded-full border-2 border-white/10 border-t-[#e8a87c]" />
+          <div className="absolute inset-0 animate-spin rounded-full border-2 border-white/10 border-t-[#c8f542]" />
         </div>
-        <p className="text-sm font-medium text-white/85">Cargando camiseta 3D</p>
+        <p className="font-display text-lg tracking-[0.12em] text-white/90">Loading drop</p>
         <div className="h-1 w-40 overflow-hidden rounded-full bg-white/10">
           <div
-            className="h-full rounded-full bg-[#e8a87c] transition-all duration-300"
+            className="h-full rounded-full bg-[#c8f542] transition-all duration-300"
             style={{ width: `${Math.max(progress, 8)}%` }}
           />
         </div>
@@ -84,14 +85,21 @@ function Scene({
 }) {
   const { gl, scene, camera } = useThree()
   const shirtId = useMockupStore((s) => s.shirtId)
+  const studioBgColor = useMockupStore((s) => s.studioBgColor)
 
   useEffect(() => {
     onReady(gl, scene, camera)
   }, [gl, scene, camera, onReady])
 
+  const floorColor = useMemo(() => {
+    const c = new THREE.Color(studioBgColor)
+    c.multiplyScalar(0.45)
+    return `#${c.getHexString()}`
+  }, [studioBgColor])
+
   return (
     <>
-      <color attach="background" args={['#0b0d12']} />
+      <color attach="background" args={[studioBgColor]} />
       <ambientLight intensity={0.7} />
       <directionalLight position={[4, 6, 4]} intensity={1.15} />
       <directionalLight position={[-3, 2, -2]} intensity={0.45} color="#a8c0ff" />
@@ -105,7 +113,7 @@ function Scene({
 
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.95, 0]} receiveShadow={false}>
         <circleGeometry args={[1.6, 48]} />
-        <meshBasicMaterial color="#050608" transparent opacity={0.55} />
+        <meshBasicMaterial color={floorColor} transparent opacity={0.55} />
       </mesh>
 
       <OrbitControls

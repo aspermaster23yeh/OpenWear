@@ -1,6 +1,6 @@
-# ThreadLab — 3D Shirt Mockup
+# OPENWEAR — 3D Streetwear Mockup
 
-Aplicación web interactiva para generar mockups de camisetas en 360° con React Three Fiber.
+Estudio web interactivo para mockups de camisetas en 360° (React Three Fiber).
 
 ## Stack
 
@@ -19,22 +19,7 @@ npm run dev
 
 ## Funciones
 
-- Visor 3D con OrbitControls, Environment `city` y sombras de estudio
-- Modelo GLTF de camiseta (drei-assets)
-- Decal PNG/JPG con posición, escala, rotación y cara frente/espalda
-- Presets de color y de cámara
-- Exportar render PNG (fondo de estudio o transparente)
-- Drag & drop de diseños sobre el viewport
-
-## Estructura
-
-```
-src/
-  components/
-    Canvas3D.tsx      # Escena, cámara, luces, export
-    ShirtModel.tsx    # Malla, material, Decal
-    UIOverlay.tsx     # Panel de controles
-  store/
-    useMockupStore.ts # Estado del mockup
-  App.tsx
-```
+- Modelos Straight cut y Relaxed
+- Centro de control: color, diseño, cámara y **fondo del estudio**
+- Decal PNG/JPG con posición, escala y rotación
+- Exportar render PNG (con o sin fondo transparente)
