@@ -71,7 +71,7 @@ function createGraphic(partial: Partial<Graphic> & { url: string }): Graphic {
     url: partial.url,
     name: partial.name ?? 'Gráfico',
     position: partial.position ?? { x: 0, y: 0.12, z: 0.26 },
-    scale: partial.scale ?? 0.2,
+    scale: partial.scale ?? 0.35,
     rotation: partial.rotation ?? 0,
     side: partial.side ?? 'front',
   }

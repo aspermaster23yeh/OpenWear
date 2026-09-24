@@ -434,9 +434,9 @@ export function UIOverlay({
                   <SliderRow
                     label="Escala"
                     value={active.scale}
-                    min={0.05}
-                    max={0.4}
-                    step={0.005}
+                    min={0.08}
+                    max={1.0}
+                    step={0.01}
                     onChange={setActiveScale}
                   />
                   <SliderRow

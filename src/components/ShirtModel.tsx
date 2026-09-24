@@ -27,10 +27,10 @@ const HIDDEN_MESHES: Partial<Record<ShirtId, string[]>> = {
 }
 
 const TARGET_SIZE = 1.15
-const LAYER_EPS = 0.003
+const LAYER_EPS = 0.0035
 /** Projector starts this far along the normal before casting back onto fabric. */
-const PROJECTOR_PULL = 0.18
-const PATCH_RES = 5
+const PROJECTOR_PULL = 0.22
+const PATCH_RES = 8
 
 const _local = new THREE.Vector3()
 const _normal = new THREE.Vector3()
@@ -197,6 +197,8 @@ function projectPatchOntoShirt(
 
   pos.needsUpdate = true
   geometry.computeVertexNormals()
+  geometry.computeBoundingSphere()
+  geometry.computeBoundingBox()
 
   if (hits < 3) {
     // Absolute fallback: flat card at stored pose, identity-sized then scaled via verts
@@ -212,6 +214,8 @@ function projectPatchOntoShirt(
     }
     pos.needsUpdate = true
     geometry.computeVertexNormals()
+    geometry.computeBoundingSphere()
+    geometry.computeBoundingBox()
   }
 }
 
@@ -247,7 +251,10 @@ function GraphicLayer({
 
   useLayoutEffect(() => {
     texture.colorSpace = THREE.SRGBColorSpace
-    texture.anisotropy = 2
+    texture.anisotropy = 8
+    texture.minFilter = THREE.LinearMipmapLinearFilter
+    texture.magFilter = THREE.LinearFilter
+    texture.generateMipmaps = true
     texture.needsUpdate = true
   }, [texture])
 
@@ -287,35 +294,56 @@ function GraphicLayer({
   ])
 
   return (
-    <mesh
-      ref={meshRef}
-      geometry={geometry}
-      userData={{ graphicId: graphic.id }}
-      renderOrder={20}
-      frustumCulled
-      onPointerOver={(e) => {
-        e.stopPropagation()
-        setHovered(true)
-      }}
-      onPointerOut={() => setHovered(false)}
-      onPointerDown={(e: ThreeEvent<PointerEvent>) => {
-        e.stopPropagation()
-        onDragStart(graphic.id)
-      }}
-    >
-      <meshBasicMaterial
-        map={texture}
-        transparent
-        depthTest
-        depthWrite={false}
-        polygonOffset
-        polygonOffsetFactor={-8}
-        polygonOffsetUnits={-8}
-        toneMapped={false}
-        side={THREE.DoubleSide}
-        opacity={isActive ? 1 : 0.92}
-      />
-    </mesh>
+    <group>
+      {/* Grab handle — invisible but raycastable (visible=false skips hits in Three.js) */}
+      <mesh
+        position={[graphic.position.x, graphic.position.y, graphic.position.z]}
+        rotation={[0, graphic.side === 'front' ? 0 : Math.PI, graphic.rotation]}
+        scale={Math.max(graphic.scale, 0.12) * 1.25}
+        renderOrder={21}
+        onPointerOver={(e) => {
+          e.stopPropagation()
+          setHovered(true)
+        }}
+        onPointerOut={() => setHovered(false)}
+        onPointerDown={(e: ThreeEvent<PointerEvent>) => {
+          e.stopPropagation()
+          onDragStart(graphic.id)
+        }}
+      >
+        <planeGeometry args={[1, 1]} />
+        <meshBasicMaterial
+          transparent
+          opacity={0}
+          depthTest={false}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+
+      <mesh
+        ref={meshRef}
+        geometry={geometry}
+        userData={{ graphicId: graphic.id }}
+        renderOrder={20}
+        frustumCulled={false}
+        // Visual only — dragging uses the handle above
+        raycast={() => undefined}
+      >
+        <meshBasicMaterial
+          map={texture}
+          transparent
+          depthTest
+          depthWrite={false}
+          polygonOffset
+          polygonOffsetFactor={-8}
+          polygonOffsetUnits={-8}
+          toneMapped={false}
+          side={THREE.DoubleSide}
+          opacity={isActive ? 1 : 0.92}
+        />
+      </mesh>
+    </group>
   )
 }
 
