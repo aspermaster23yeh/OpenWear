@@ -27,7 +27,10 @@ const HIDDEN_MESHES: Partial<Record<ShirtId, string[]>> = {
 }
 
 const TARGET_SIZE = 1.15
-const LAYER_EPS = 0.003
+/** Lift for projected (curved) vertices — tiny to hug fabric. */
+const LAYER_EPS = 0.0025
+/** Extra lift while dragging a flat preview so it never sinks into the mesh. */
+const DRAG_LIFT = 0.055
 const PATCH_RES = 6
 
 const _local = new THREE.Vector3()
@@ -74,6 +77,7 @@ function getBodyMeshes(root: THREE.Object3D) {
 function placeFromHit(
   hit: THREE.Intersection,
   parent: THREE.Object3D,
+  lift = LAYER_EPS,
 ): { position: { x: number; y: number; z: number }; side: 'front' | 'back' } | null {
   if (!hit.face) return null
 
@@ -87,7 +91,7 @@ function placeFromHit(
   if (side === 'front' && _normal.z < 0) _normal.negate()
   if (side === 'back' && _normal.z > 0) _normal.negate()
 
-  parent.worldToLocal(_local.copy(hit.point).addScaledVector(_normal, LAYER_EPS))
+  parent.worldToLocal(_local.copy(hit.point).addScaledVector(_normal, lift))
 
   return {
     position: { x: _local.x, y: _local.y, z: _local.z },
@@ -210,13 +214,14 @@ function GraphicLayer({
     texture.needsUpdate = true
   }, [texture])
 
-  // Flat preview while dragging — no raycasts (keeps orbit/drag responsive)
+  // Flat preview while dragging — float above fabric (depthTest off + lift)
   useLayoutEffect(() => {
     const mesh = meshRef.current
     if (!mesh) return
 
     if (isDraggingGraphic && isActive) {
       resetFlatPlane(geometry)
+      // position already includes DRAG_LIFT from placeFromHit
       mesh.position.set(
         graphic.position.x,
         graphic.position.y,
@@ -280,6 +285,8 @@ function GraphicLayer({
     invalidate,
   ])
 
+  const floating = isDraggingGraphic && isActive
+
   return (
     <mesh
       ref={meshRef}
@@ -300,11 +307,11 @@ function GraphicLayer({
       <meshBasicMaterial
         map={texture}
         transparent
-        depthTest
+        depthTest={!floating}
         depthWrite={false}
         polygonOffset
-        polygonOffsetFactor={-4}
-        polygonOffsetUnits={-4}
+        polygonOffsetFactor={-8}
+        polygonOffsetUnits={-8}
         toneMapped={false}
         side={THREE.DoubleSide}
         opacity={isActive ? 1 : 0.92}
@@ -347,7 +354,7 @@ function DragSystem({
     const hit = _raycaster.intersectObjects(shirtMeshes.slice(0, 1), false)[0]
     if (!hit) return
 
-    const placed = placeFromHit(hit, parent)
+    const placed = placeFromHit(hit, parent, DRAG_LIFT)
     if (!placed) return
     updateActiveGraphic({ position: placed.position, side: placed.side })
     invalidate()
