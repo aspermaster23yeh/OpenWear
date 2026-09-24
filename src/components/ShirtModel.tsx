@@ -1,5 +1,5 @@
 import { useCursor, useGLTF, useTexture } from '@react-three/drei'
-import { useThree, type ThreeEvent } from '@react-three/fiber'
+import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import {
   useEffect,
   useLayoutEffect,
@@ -28,10 +28,15 @@ const HIDDEN_MESHES: Partial<Record<ShirtId, string[]>> = {
 
 const MAX_TEX_SIZE = 1024
 const TARGET_SIZE = 1.15
-const LAYER_EPS = 0.004
+/** Lift above fabric so the layer doesn't z-fight. */
+const LAYER_EPS = 0.003
+/** Low-res grid — enough to follow chest curve, light enough to stay smooth. */
+const PATCH_RES = 6
 
 const _local = new THREE.Vector3()
 const _normal = new THREE.Vector3()
+const _origin = new THREE.Vector3()
+const _dir = new THREE.Vector3()
 const _ndc = new THREE.Vector2()
 const _raycaster = new THREE.Raycaster()
 
@@ -93,6 +98,19 @@ function fitToUnitSize(root: THREE.Object3D) {
   root.position.sub(center)
 }
 
+function getBodyMeshes(root: THREE.Object3D) {
+  const meshes: THREE.Mesh[] = []
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh
+    if (mesh.isMesh && mesh.visible && mesh.userData.isShirt) meshes.push(mesh)
+  })
+  return meshes.sort((a, b) => {
+    const va = a.geometry?.attributes?.position?.count ?? 0
+    const vb = b.geometry?.attributes?.position?.count ?? 0
+    return vb - va
+  })
+}
+
 function placeFromHit(
   hit: THREE.Intersection,
   parent: THREE.Object3D,
@@ -117,18 +135,116 @@ function placeFromHit(
   }
 }
 
+/** Reset subdivided plane to a flat unit square in XY. */
+function resetFlatPlane(geometry: THREE.PlaneGeometry) {
+  const pos = geometry.attributes.position
+  const uv = geometry.attributes.uv
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(i, uv.getX(i) - 0.5, uv.getY(i) - 0.5, 0)
+  }
+  pos.needsUpdate = true
+  geometry.computeVertexNormals()
+}
+
+/**
+ * Project every grid vertex onto the shirt so the graphic follows mold curvature.
+ * Vertices end up in `parent` local space; mesh transform should be identity.
+ */
+function projectPatchOntoShirt(
+  geometry: THREE.PlaneGeometry,
+  parent: THREE.Object3D,
+  bodyMeshes: THREE.Mesh[],
+  graphic: Graphic,
+) {
+  if (!bodyMeshes.length) return
+
+  parent.updateMatrixWorld(true)
+  const fromFront = graphic.side === 'front'
+  const cx = graphic.position.x
+  const cy = graphic.position.y
+  const cos = Math.cos(graphic.rotation)
+  const sin = Math.sin(graphic.rotation)
+  const targets = bodyMeshes.slice(0, 1)
+
+  const pos = geometry.attributes.position
+  const uv = geometry.attributes.uv
+  let hits = 0
+
+  for (let i = 0; i < pos.count; i++) {
+    const u = uv.getX(i) - 0.5
+    const v = uv.getY(i) - 0.5
+    const ru = u * cos - v * sin
+    const rv = u * sin + v * cos
+    const x = cx + ru * graphic.scale
+    const y = cy + rv * graphic.scale
+
+    _origin.set(x, y, fromFront ? 1.4 : -1.4).applyMatrix4(parent.matrixWorld)
+    _dir
+      .set(0, 0, fromFront ? -1 : 1)
+      .transformDirection(parent.matrixWorld)
+      .normalize()
+    _raycaster.set(_origin, _dir)
+    _raycaster.far = 4
+
+    const hit = _raycaster.intersectObjects(targets, false)[0]
+    if (hit?.face) {
+      hits++
+      _normal
+        .copy(hit.face.normal)
+        .transformDirection(hit.object.matrixWorld)
+        .normalize()
+      if (fromFront && _normal.z < 0) _normal.negate()
+      if (!fromFront && _normal.z > 0) _normal.negate()
+
+      parent.worldToLocal(
+        _local.copy(hit.point).addScaledVector(_normal, LAYER_EPS),
+      )
+      pos.setXYZ(i, _local.x, _local.y, _local.z)
+    } else {
+      // Keep center depth if a corner misses (sleeve edge, etc.)
+      pos.setXYZ(i, x, y, graphic.position.z)
+    }
+  }
+
+  pos.needsUpdate = true
+  geometry.computeVertexNormals()
+
+  // If almost nothing hit, leave a flat card at the stored pose
+  if (hits < pos.count * 0.3) {
+    resetFlatPlane(geometry)
+  }
+}
+
 function GraphicLayer({
   graphic,
   isActive,
+  shirtRoot,
+  groupRef,
   onDragStart,
 }: {
   graphic: Graphic
   isActive: boolean
+  shirtRoot: THREE.Object3D
+  groupRef: RefObject<THREE.Group | null>
   onDragStart: (id: string) => void
 }) {
   const texture = useTexture(graphic.url)
+  const isDraggingGraphic = useMockupStore((s) => s.isDraggingGraphic)
   const [hovered, setHovered] = useState(false)
   useCursor(hovered, 'grab', 'auto')
+
+  const meshRef = useRef<THREE.Mesh>(null)
+  const needsProject = useRef(true)
+  const flatPreview = useRef(false)
+  const warmFrames = useRef(0)
+
+  const geometry = useMemo(
+    () => new THREE.PlaneGeometry(1, 1, PATCH_RES, PATCH_RES),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [graphic.id, graphic.url],
+  )
+
+  const bodyMeshes = useMemo(() => getBodyMeshes(shirtRoot), [shirtRoot])
 
   useLayoutEffect(() => {
     texture.colorSpace = THREE.SRGBColorSpace
@@ -136,14 +252,65 @@ function GraphicLayer({
     texture.needsUpdate = true
   }, [texture])
 
-  const rotY = graphic.side === 'front' ? 0 : Math.PI
+  useLayoutEffect(() => {
+    needsProject.current = true
+    warmFrames.current = 0
+  }, [
+    graphic.position.x,
+    graphic.position.y,
+    graphic.position.z,
+    graphic.scale,
+    graphic.rotation,
+    graphic.side,
+    bodyMeshes,
+  ])
+
+  useFrame(() => {
+    const mesh = meshRef.current
+    const parent = groupRef.current
+    if (!mesh || !parent) return
+
+    const draggingThis = isDraggingGraphic && isActive
+
+    // While dragging: flat preview (1 transform, no 49 raycasts)
+    if (draggingThis) {
+      if (!flatPreview.current) {
+        resetFlatPlane(geometry)
+        flatPreview.current = true
+      }
+      mesh.position.set(
+        graphic.position.x,
+        graphic.position.y,
+        graphic.position.z,
+      )
+      mesh.rotation.set(
+        0,
+        graphic.side === 'front' ? 0 : Math.PI,
+        graphic.rotation,
+      )
+      mesh.scale.setScalar(graphic.scale)
+      return
+    }
+
+    // After drag / on edit: project onto mold curvature
+    const warming = warmFrames.current < 6
+    if (warming) warmFrames.current += 1
+
+    if (!needsProject.current && !warming && !flatPreview.current) return
+
+    flatPreview.current = false
+    needsProject.current = false
+    mesh.position.set(0, 0, 0)
+    mesh.rotation.set(0, 0, 0)
+    mesh.scale.set(1, 1, 1)
+    projectPatchOntoShirt(geometry, parent, bodyMeshes, graphic)
+  })
 
   return (
     <mesh
+      ref={meshRef}
+      geometry={geometry}
       userData={{ graphicId: graphic.id }}
-      position={[graphic.position.x, graphic.position.y, graphic.position.z]}
-      rotation={[0, rotY, graphic.rotation]}
-      scale={graphic.scale}
       renderOrder={20}
       frustumCulled={false}
       onPointerOver={(e) => {
@@ -156,29 +323,18 @@ function GraphicLayer({
         onDragStart(graphic.id)
       }}
     >
-      <planeGeometry args={[1, 1]} />
       <meshBasicMaterial
         map={texture}
         transparent
-        depthTest={false}
+        depthTest
         depthWrite={false}
+        polygonOffset
+        polygonOffsetFactor={-4}
+        polygonOffsetUnits={-4}
         toneMapped={false}
         side={THREE.DoubleSide}
-        opacity={isActive ? 1 : 0.9}
+        opacity={isActive ? 1 : 0.92}
       />
-      {isActive && (
-        <mesh position={[0, 0, -0.002]} scale={1.05} renderOrder={19}>
-          <planeGeometry args={[1, 1]} />
-          <meshBasicMaterial
-            color="#c8f542"
-            transparent
-            opacity={0.3}
-            depthTest={false}
-            depthWrite={false}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
-      )}
     </mesh>
   )
 }
@@ -203,18 +359,7 @@ function DragSystem({
   const updateActiveGraphic = useMockupStore((s) => s.updateActiveGraphic)
   const dragging = useRef(false)
 
-  const shirtMeshes = useMemo(() => {
-    const meshes: THREE.Mesh[] = []
-    shirtRoot.traverse((child) => {
-      const mesh = child as THREE.Mesh
-      if (mesh.isMesh && mesh.visible && mesh.userData.isShirt) meshes.push(mesh)
-    })
-    return meshes.sort((a, b) => {
-      const va = a.geometry?.attributes?.position?.count ?? 0
-      const vb = b.geometry?.attributes?.position?.count ?? 0
-      return vb - va
-    })
-  }, [shirtRoot])
+  const shirtMeshes = useMemo(() => getBodyMeshes(shirtRoot), [shirtRoot])
 
   const applyHit = (clientX: number, clientY: number) => {
     const parent = groupRef.current
@@ -346,6 +491,8 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
           key={`${graphic.id}:${graphic.url}`}
           graphic={graphic}
           isActive={graphic.id === activeGraphicId}
+          shirtRoot={cloned}
+          groupRef={groupRef}
           onDragStart={(id) => dragApiRef.current?.startDrag(id)}
         />
       ))}
