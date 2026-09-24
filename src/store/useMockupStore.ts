@@ -52,20 +52,45 @@ export const SHIRT_MODELS: {
 ]
 
 export const DEFAULT_LOGO = '/demo-logo.svg'
+export const MAX_GRAPHICS = 8
 
-interface LogoPosition {
-  x: number
-  y: number
+export interface Graphic {
+  id: string
+  url: string
+  name: string
+  position: { x: number; y: number }
+  scale: number
+  rotation: number
+  side: DecalSide
+}
+
+function createGraphic(partial: Partial<Graphic> & { url: string }): Graphic {
+  return {
+    id: partial.id ?? crypto.randomUUID(),
+    url: partial.url,
+    name: partial.name ?? 'Gráfico',
+    position: partial.position ?? { x: 0, y: 0.04 },
+    scale: partial.scale ?? 0.2,
+    rotation: partial.rotation ?? 0,
+    side: partial.side ?? 'front',
+  }
+}
+
+function defaultGraphics(): Graphic[] {
+  return [
+    createGraphic({
+      id: 'demo',
+      url: DEFAULT_LOGO,
+      name: 'Demo',
+    }),
+  ]
 }
 
 interface MockupState {
   shirtId: ShirtId
   color: string
-  logoUrl: string
-  logoPosition: LogoPosition
-  logoScale: number
-  logoRotation: number
-  decalSide: DecalSide
+  graphics: Graphic[]
+  activeGraphicId: string | null
   cameraPreset: CameraPreset
   exportTransparent: boolean
   isDraggingFile: boolean
@@ -74,29 +99,32 @@ interface MockupState {
 
   setShirtId: (shirtId: ShirtId) => void
   setColor: (color: string) => void
-  setLogoUrl: (url: string) => void
-  setLogoPosition: (position: Partial<LogoPosition>) => void
-  setLogoScale: (scale: number) => void
-  setLogoRotation: (rotation: number) => void
-  setDecalSide: (side: DecalSide) => void
+  addGraphic: (url: string, name?: string) => void
+  replaceActiveGraphicUrl: (url: string, name?: string) => void
+  removeGraphic: (id: string) => void
+  selectGraphic: (id: string) => void
+  updateActiveGraphic: (
+    patch: Partial<Omit<Graphic, 'id' | 'url' | 'name'>>,
+  ) => void
+  setActiveSide: (side: DecalSide) => void
+  setActivePosition: (position: Partial<Graphic['position']>) => void
+  setActiveScale: (scale: number) => void
+  setActiveRotation: (rotation: number) => void
   setCameraPreset: (preset: CameraPreset) => void
   setExportTransparent: (value: boolean) => void
   setIsDraggingFile: (value: boolean) => void
   setStudioBgId: (id: StudioBgId) => void
   setStudioBgColor: (color: string) => void
-  resetLogo: () => void
+  resetGraphics: () => void
 }
 
 const defaultBg = STUDIO_BACKGROUNDS[0]
 
-export const useMockupStore = create<MockupState>((set) => ({
+export const useMockupStore = create<MockupState>((set, get) => ({
   shirtId: 'straight',
   color: '#ffffff',
-  logoUrl: DEFAULT_LOGO,
-  logoPosition: { x: 0, y: 0.04 },
-  logoScale: 0.22,
-  logoRotation: 0,
-  decalSide: 'front',
+  graphics: defaultGraphics(),
+  activeGraphicId: 'demo',
   cameraPreset: null,
   exportTransparent: false,
   isDraggingFile: false,
@@ -105,14 +133,88 @@ export const useMockupStore = create<MockupState>((set) => ({
 
   setShirtId: (shirtId) => set({ shirtId }),
   setColor: (color) => set({ color }),
-  setLogoUrl: (logoUrl) => set({ logoUrl }),
-  setLogoPosition: (position) =>
-    set((state) => ({
-      logoPosition: { ...state.logoPosition, ...position },
-    })),
-  setLogoScale: (logoScale) => set({ logoScale }),
-  setLogoRotation: (logoRotation) => set({ logoRotation }),
-  setDecalSide: (decalSide) => set({ decalSide }),
+
+  addGraphic: (url, name) => {
+    const state = get()
+    if (state.graphics.length >= MAX_GRAPHICS) return
+
+    const graphic = createGraphic({
+      url,
+      name: name ?? `Gráfico ${state.graphics.length + 1}`,
+      position: {
+        x: (state.graphics.length % 3) * 0.04 - 0.04,
+        y: 0.04 - Math.floor(state.graphics.length / 3) * 0.05,
+      },
+    })
+
+    set({
+      graphics: [...state.graphics, graphic],
+      activeGraphicId: graphic.id,
+    })
+  },
+
+  replaceActiveGraphicUrl: (url, name) => {
+    const { activeGraphicId, graphics } = get()
+    if (!activeGraphicId) {
+      get().addGraphic(url, name)
+      return
+    }
+
+    const prev = graphics.find((g) => g.id === activeGraphicId)
+    if (prev?.url.startsWith('blob:') && prev.url !== url) {
+      URL.revokeObjectURL(prev.url)
+    }
+
+    set({
+      graphics: graphics.map((g) =>
+        g.id === activeGraphicId
+          ? { ...g, url, name: name ?? g.name }
+          : g,
+      ),
+    })
+  },
+
+  removeGraphic: (id) => {
+    const { graphics, activeGraphicId } = get()
+    const target = graphics.find((g) => g.id === id)
+    if (target?.url.startsWith('blob:')) URL.revokeObjectURL(target.url)
+
+    const next = graphics.filter((g) => g.id !== id)
+    const fallback = next.length ? next[next.length - 1].id : null
+    set({
+      graphics: next,
+      activeGraphicId:
+        activeGraphicId === id ? fallback : activeGraphicId,
+    })
+  },
+
+  selectGraphic: (id) => set({ activeGraphicId: id }),
+
+  updateActiveGraphic: (patch) => {
+    const { activeGraphicId, graphics } = get()
+    if (!activeGraphicId) return
+    set({
+      graphics: graphics.map((g) =>
+        g.id === activeGraphicId ? { ...g, ...patch } : g,
+      ),
+    })
+  },
+
+  setActiveSide: (side) => get().updateActiveGraphic({ side }),
+  setActivePosition: (position) => {
+    const { activeGraphicId, graphics } = get()
+    if (!activeGraphicId) return
+    set({
+      graphics: graphics.map((g) =>
+        g.id === activeGraphicId
+          ? { ...g, position: { ...g.position, ...position } }
+          : g,
+      ),
+    })
+  },
+  setActiveScale: (scale) => get().updateActiveGraphic({ scale }),
+  setActiveRotation: (rotation) => get().updateActiveGraphic({ rotation }),
+
   setCameraPreset: (cameraPreset) => set({ cameraPreset }),
   setExportTransparent: (exportTransparent) => set({ exportTransparent }),
   setIsDraggingFile: (isDraggingFile) => set({ isDraggingFile }),
@@ -129,12 +231,12 @@ export const useMockupStore = create<MockupState>((set) => ({
   },
   setStudioBgColor: (studioBgColor) =>
     set({ studioBgId: 'custom', studioBgColor }),
-  resetLogo: () =>
-    set({
-      logoUrl: DEFAULT_LOGO,
-      logoPosition: { x: 0, y: 0.04 },
-      logoScale: 0.22,
-      logoRotation: 0,
-      decalSide: 'front',
-    }),
+  resetGraphics: () => {
+    const { graphics } = get()
+    for (const g of graphics) {
+      if (g.url.startsWith('blob:')) URL.revokeObjectURL(g.url)
+    }
+    const next = defaultGraphics()
+    set({ graphics: next, activeGraphicId: next[0]?.id ?? null })
+  },
 }))

@@ -3,13 +3,16 @@ import {
   Download,
   ImagePlus,
   Loader2,
+  Plus,
   RotateCcw,
+  Trash2,
   Upload,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import {
   COLOR_PRESETS,
   DEFAULT_LOGO,
+  MAX_GRAPHICS,
   SHIRT_MODELS,
   STUDIO_BACKGROUNDS,
   useMockupStore,
@@ -19,7 +22,7 @@ import {
 interface UIOverlayProps {
   onExport: () => void
   isExporting?: boolean
-  onFileSelected: (file: File | undefined) => void
+  onFileSelected: (file: File | undefined, mode?: 'add' | 'replace') => void
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -39,6 +42,7 @@ function SliderRow({
   step,
   onChange,
   display,
+  disabled,
 }: {
   label: string
   value: number
@@ -47,9 +51,10 @@ function SliderRow({
   step: number
   onChange: (v: number) => void
   display?: string
+  disabled?: boolean
 }) {
   return (
-    <label className="block space-y-1.5">
+    <label className={`block space-y-1.5 ${disabled ? 'opacity-40' : ''}`}>
       <div className="flex items-center justify-between text-xs text-white/70">
         <span>{label}</span>
         <span className="tabular-nums text-white/45">{display ?? value.toFixed(2)}</span>
@@ -60,6 +65,7 @@ function SliderRow({
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
       />
     </label>
@@ -71,16 +77,14 @@ export function UIOverlay({
   isExporting = false,
   onFileSelected,
 }: UIOverlayProps) {
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const addInputRef = useRef<HTMLInputElement>(null)
+  const replaceInputRef = useRef<HTMLInputElement>(null)
   const [panelOpen, setPanelOpen] = useState(true)
 
   const shirtId = useMockupStore((s) => s.shirtId)
   const color = useMockupStore((s) => s.color)
-  const logoUrl = useMockupStore((s) => s.logoUrl)
-  const logoPosition = useMockupStore((s) => s.logoPosition)
-  const logoScale = useMockupStore((s) => s.logoScale)
-  const logoRotation = useMockupStore((s) => s.logoRotation)
-  const decalSide = useMockupStore((s) => s.decalSide)
+  const graphics = useMockupStore((s) => s.graphics)
+  const activeGraphicId = useMockupStore((s) => s.activeGraphicId)
   const exportTransparent = useMockupStore((s) => s.exportTransparent)
   const isDraggingFile = useMockupStore((s) => s.isDraggingFile)
   const studioBgId = useMockupStore((s) => s.studioBgId)
@@ -88,23 +92,35 @@ export function UIOverlay({
 
   const setShirtId = useMockupStore((s) => s.setShirtId)
   const setColor = useMockupStore((s) => s.setColor)
-  const setLogoUrl = useMockupStore((s) => s.setLogoUrl)
-  const setLogoPosition = useMockupStore((s) => s.setLogoPosition)
-  const setLogoScale = useMockupStore((s) => s.setLogoScale)
-  const setLogoRotation = useMockupStore((s) => s.setLogoRotation)
-  const setDecalSide = useMockupStore((s) => s.setDecalSide)
+  const selectGraphic = useMockupStore((s) => s.selectGraphic)
+  const removeGraphic = useMockupStore((s) => s.removeGraphic)
+  const setActiveSide = useMockupStore((s) => s.setActiveSide)
+  const setActivePosition = useMockupStore((s) => s.setActivePosition)
+  const setActiveScale = useMockupStore((s) => s.setActiveScale)
+  const setActiveRotation = useMockupStore((s) => s.setActiveRotation)
   const setCameraPreset = useMockupStore((s) => s.setCameraPreset)
   const setExportTransparent = useMockupStore((s) => s.setExportTransparent)
   const setStudioBgId = useMockupStore((s) => s.setStudioBgId)
   const setStudioBgColor = useMockupStore((s) => s.setStudioBgColor)
-  const resetLogo = useMockupStore((s) => s.resetLogo)
+  const resetGraphics = useMockupStore((s) => s.resetGraphics)
+  const replaceActiveGraphicUrl = useMockupStore((s) => s.replaceActiveGraphicUrl)
+
+  const active = useMemo(
+    () => graphics.find((g) => g.id === activeGraphicId) ?? null,
+    [graphics, activeGraphicId],
+  )
 
   useEffect(() => {
     document.documentElement.style.setProperty('--studio-bg', studioBgColor)
   }, [studioBgColor])
 
-  const onFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    onFileSelected(e.target.files?.[0])
+  const onAddFile = (e: ChangeEvent<HTMLInputElement>) => {
+    onFileSelected(e.target.files?.[0], 'add')
+    e.target.value = ''
+  }
+
+  const onReplaceFile = (e: ChangeEvent<HTMLInputElement>) => {
+    onFileSelected(e.target.files?.[0], 'replace')
     e.target.value = ''
   }
 
@@ -122,6 +138,8 @@ export function UIOverlay({
     const b = parseInt(hex.slice(4, 6), 16)
     return (r * 299 + g * 587 + b * 114) / 1000 > 150
   })()
+
+  const canAdd = graphics.length < MAX_GRAPHICS
 
   return (
     <>
@@ -156,7 +174,7 @@ export function UIOverlay({
         <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-3 border border-dashed border-[#c8f542]/60 bg-black/40 px-10 py-12">
             <Upload className="h-8 w-8 text-[#c8f542]" />
-            <p className="font-display text-xl tracking-[0.12em] text-white">Drop your graphic</p>
+            <p className="font-display text-xl tracking-[0.12em] text-white">Drop to add graphic</p>
           </div>
         </div>
       )}
@@ -177,9 +195,9 @@ export function UIOverlay({
           </div>
           <button
             type="button"
-            onClick={resetLogo}
+            onClick={resetGraphics}
             className="inline-flex items-center gap-1.5 bg-white/5 px-2.5 py-1.5 text-[11px] uppercase tracking-wider text-white/60 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
-            title="Restablecer diseño"
+            title="Restablecer gráficos"
           >
             <RotateCcw className="h-3 w-3" />
             Reset
@@ -201,10 +219,7 @@ export function UIOverlay({
                       : 'ring-white/10 hover:ring-white/30'
                   }`}
                 >
-                  <span
-                    className="h-10 w-full"
-                    style={{ backgroundColor: bg.color }}
-                  />
+                  <span className="h-10 w-full" style={{ backgroundColor: bg.color }} />
                   <span className="font-display text-[11px] tracking-[0.12em] text-white/55 group-hover:text-white/80">
                     {bg.name}
                   </span>
@@ -254,39 +269,89 @@ export function UIOverlay({
             </div>
           </Section>
 
-          <Section title="Diseño">
+          <Section title="Gráficos">
             <input
-              ref={fileInputRef}
+              ref={addInputRef}
               type="file"
               accept="image/png,image/jpeg,image/jpg,image/webp"
               className="hidden"
-              onChange={onFileChange}
+              onChange={onAddFile}
             />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="group flex w-full items-center gap-3 border border-dashed border-white/15 bg-white/[0.03] px-3.5 py-3.5 text-left transition hover:border-[#c8f542]/40 hover:bg-white/[0.06]"
-            >
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden bg-white/10 ring-1 ring-white/10">
-                {logoUrl ? (
-                  <img src={logoUrl} alt="Preview" className="h-full w-full object-contain p-1" />
-                ) : (
-                  <ImagePlus className="h-5 w-5 text-white/50" />
-                )}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="font-display text-base tracking-[0.08em] text-white">Upload graphic</p>
-                <p className="truncate text-xs text-white/40">PNG · JPG · WebP</p>
-              </div>
-              <Upload className="h-4 w-4 text-white/35 transition group-hover:text-[#c8f542]" />
-            </button>
-            {logoUrl !== DEFAULT_LOGO && (
+            <input
+              ref={replaceInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/jpg,image/webp"
+              className="hidden"
+              onChange={onReplaceFile}
+            />
+
+            <div className="grid grid-cols-4 gap-2">
+              {graphics.map((g, index) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  title={g.name}
+                  onClick={() => selectGraphic(g.id)}
+                  className={`relative aspect-square overflow-hidden bg-white/5 transition ${
+                    g.id === activeGraphicId
+                      ? 'ring-2 ring-[#c8f542]'
+                      : 'ring-1 ring-white/10 hover:ring-white/30'
+                  }`}
+                >
+                  <img
+                    src={g.url}
+                    alt={g.name}
+                    className="h-full w-full object-contain p-1"
+                  />
+                  <span className="absolute bottom-0.5 left-0.5 bg-black/70 px-1 font-display text-[10px] text-white/80">
+                    {index + 1}
+                  </span>
+                </button>
+              ))}
+
+              {canAdd && (
+                <button
+                  type="button"
+                  onClick={() => addInputRef.current?.click()}
+                  className="flex aspect-square flex-col items-center justify-center gap-1 bg-white/[0.03] ring-1 ring-dashed ring-white/20 transition hover:bg-white/[0.06] hover:ring-[#c8f542]/50"
+                  title="Añadir gráfico"
+                >
+                  <Plus className="h-4 w-4 text-[#c8f542]" />
+                  <span className="font-display text-[10px] tracking-[0.08em] text-white/50">
+                    Add
+                  </span>
+                </button>
+              )}
+            </div>
+
+            <p className="text-[11px] text-white/35">
+              {graphics.length}/{MAX_GRAPHICS} elementos · drop PNG para añadir
+            </p>
+
+            <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  if (logoUrl.startsWith('blob:')) URL.revokeObjectURL(logoUrl)
-                  setLogoUrl(DEFAULT_LOGO)
-                }}
+                onClick={() => replaceInputRef.current?.click()}
+                disabled={!active}
+                className="flex flex-1 items-center justify-center gap-1.5 bg-white/5 px-3 py-2 text-xs uppercase tracking-wider text-white/70 ring-1 ring-white/10 transition hover:bg-white/10 disabled:opacity-40"
+              >
+                <ImagePlus className="h-3.5 w-3.5" />
+                Cambiar
+              </button>
+              <button
+                type="button"
+                onClick={() => active && removeGraphic(active.id)}
+                disabled={!active}
+                className="inline-flex items-center justify-center gap-1.5 bg-white/5 px-3 py-2 text-xs uppercase tracking-wider text-red-300/80 ring-1 ring-white/10 transition hover:bg-red-500/15 disabled:opacity-40"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            {active?.url !== DEFAULT_LOGO && graphics.length === 1 && (
+              <button
+                type="button"
+                onClick={() => replaceActiveGraphicUrl(DEFAULT_LOGO, 'Demo')}
                 className="text-xs text-white/40 underline-offset-2 hover:text-white/70 hover:underline"
               >
                 Usar logo de demostración
@@ -323,59 +388,66 @@ export function UIOverlay({
             <p className="text-[11px] tabular-nums text-white/35">{color.toUpperCase()}</p>
           </Section>
 
-          <Section title="Decal">
-            <div className="mb-3 grid grid-cols-2 gap-2">
-              {(['front', 'back'] as const).map((side) => (
-                <button
-                  key={side}
-                  type="button"
-                  onClick={() => setDecalSide(side)}
-                  className={`px-3 py-2 font-display text-sm tracking-[0.12em] transition ${
-                    decalSide === side
-                      ? 'bg-[#c8f542] text-[#0c0c0e]'
-                      : 'bg-white/5 text-white/65 ring-1 ring-white/10 hover:bg-white/10'
-                  }`}
-                >
-                  {side === 'front' ? 'Frente' : 'Espalda'}
-                </button>
-              ))}
-            </div>
+          <Section title="Decal activo">
+            {!active ? (
+              <p className="text-xs text-white/40">Añade un gráfico para editarlo.</p>
+            ) : (
+              <>
+                <p className="truncate text-xs text-white/50">{active.name}</p>
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  {(['front', 'back'] as const).map((side) => (
+                    <button
+                      key={side}
+                      type="button"
+                      onClick={() => setActiveSide(side)}
+                      className={`px-3 py-2 font-display text-sm tracking-[0.12em] transition ${
+                        active.side === side
+                          ? 'bg-[#c8f542] text-[#0c0c0e]'
+                          : 'bg-white/5 text-white/65 ring-1 ring-white/10 hover:bg-white/10'
+                      }`}
+                    >
+                      {side === 'front' ? 'Frente' : 'Espalda'}
+                    </button>
+                  ))}
+                </div>
 
-            <div className="space-y-3">
-              <SliderRow
-                label="Posición X"
-                value={logoPosition.x}
-                min={-0.25}
-                max={0.25}
-                step={0.005}
-                onChange={(x) => setLogoPosition({ x })}
-              />
-              <SliderRow
-                label="Posición Y"
-                value={logoPosition.y}
-                min={-0.2}
-                max={0.25}
-                step={0.005}
-                onChange={(y) => setLogoPosition({ y })}
-              />
-              <SliderRow
-                label="Escala"
-                value={logoScale}
-                min={0.05}
-                max={0.4}
-                step={0.005}
-                onChange={setLogoScale}
-              />
-              <SliderRow
-                label="Rotación"
-                value={logoRotation}
-                min={-Math.PI}
-                max={Math.PI}
-                step={0.01}
-                onChange={setLogoRotation}
-                display={`${((logoRotation * 180) / Math.PI).toFixed(0)}°`}
-              />
-            </div>
+                <div className="space-y-3">
+                  <SliderRow
+                    label="Posición X"
+                    value={active.position.x}
+                    min={-0.25}
+                    max={0.25}
+                    step={0.005}
+                    onChange={(x) => setActivePosition({ x })}
+                  />
+                  <SliderRow
+                    label="Posición Y"
+                    value={active.position.y}
+                    min={-0.2}
+                    max={0.25}
+                    step={0.005}
+                    onChange={(y) => setActivePosition({ y })}
+                  />
+                  <SliderRow
+                    label="Escala"
+                    value={active.scale}
+                    min={0.05}
+                    max={0.4}
+                    step={0.005}
+                    onChange={setActiveScale}
+                  />
+                  <SliderRow
+                    label="Rotación"
+                    value={active.rotation}
+                    min={-Math.PI}
+                    max={Math.PI}
+                    step={0.01}
+                    onChange={setActiveRotation}
+                    display={`${((active.rotation * 180) / Math.PI).toFixed(0)}°`}
+                  />
+                </div>
+              </>
+            )}
           </Section>
 
           <Section title="Cámara">
@@ -436,7 +508,7 @@ export function UIOverlay({
           isLightBg ? 'text-[#0c0c0e]/40' : 'text-white/30'
         }`}
       >
-        Drag to orbit · Scroll zoom · Drop PNG
+        Drag to orbit · Scroll zoom · Drop PNG to add
       </p>
     </>
   )

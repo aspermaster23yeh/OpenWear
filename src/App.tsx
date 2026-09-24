@@ -24,8 +24,7 @@ export default function App() {
   const canvasRef = useRef<Canvas3DHandle>(null)
   const [isExporting, setIsExporting] = useState(false)
   const exportTransparent = useMockupStore((s) => s.exportTransparent)
-  const logoUrl = useMockupStore((s) => s.logoUrl)
-  const setLogoUrl = useMockupStore((s) => s.setLogoUrl)
+  const addGraphic = useMockupStore((s) => s.addGraphic)
   const setIsDraggingFile = useMockupStore((s) => s.setIsDraggingFile)
 
   const handleExport = useCallback(() => {
@@ -37,15 +36,19 @@ export default function App() {
   }, [exportTransparent])
 
   const handleFile = useCallback(
-    (file: File | undefined) => {
+    (file: File | undefined, mode: 'add' | 'replace' = 'add') => {
       if (!file) return
       if (!file.type.match(/^image\/(png|jpeg|jpg|webp)$/)) return
 
       const url = URL.createObjectURL(file)
-      if (logoUrl.startsWith('blob:')) URL.revokeObjectURL(logoUrl)
-      setLogoUrl(url)
+      const name = file.name.replace(/\.[^.]+$/, '') || 'Gráfico'
+      if (mode === 'replace') {
+        useMockupStore.getState().replaceActiveGraphicUrl(url, name)
+      } else {
+        addGraphic(url, name)
+      }
     },
-    [logoUrl, setLogoUrl],
+    [addGraphic],
   )
 
   const onDragEnter = (e: DragEvent) => {
@@ -70,7 +73,7 @@ export default function App() {
     e.preventDefault()
     e.stopPropagation()
     setIsDraggingFile(false)
-    handleFile(e.dataTransfer.files?.[0])
+    handleFile(e.dataTransfer.files?.[0], 'add')
   }
 
   return (
