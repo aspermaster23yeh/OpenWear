@@ -1,5 +1,5 @@
 import { useCursor, useGLTF, useTexture } from '@react-three/drei'
-import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
+import { useThree, type ThreeEvent } from '@react-three/fiber'
 import {
   useEffect,
   useLayoutEffect,
@@ -26,11 +26,8 @@ const HIDDEN_MESHES: Partial<Record<ShirtId, string[]>> = {
   straight: ['REBUILD_Tonal_Double_Stitch'],
 }
 
-const MAX_TEX_SIZE = 1024
 const TARGET_SIZE = 1.15
-/** Lift above fabric so the layer doesn't z-fight. */
 const LAYER_EPS = 0.003
-/** Low-res grid — enough to follow chest curve, light enough to stay smooth. */
 const PATCH_RES = 6
 
 const _local = new THREE.Vector3()
@@ -40,49 +37,12 @@ const _dir = new THREE.Vector3()
 const _ndc = new THREE.Vector2()
 const _raycaster = new THREE.Raycaster()
 
-function downscaleTexture(tex: THREE.Texture) {
-  const img = tex.image as
-    | HTMLImageElement
-    | HTMLCanvasElement
-    | ImageBitmap
-    | undefined
-  if (!img?.width || !img?.height) return
-
-  const maxDim = Math.max(img.width, img.height)
-  if (maxDim <= MAX_TEX_SIZE) return
-
-  const scale = MAX_TEX_SIZE / maxDim
-  const w = Math.max(1, Math.round(img.width * scale))
-  const h = Math.max(1, Math.round(img.height * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-  ctx.drawImage(img as CanvasImageSource, 0, 0, w, h)
-  tex.image = canvas
-  tex.needsUpdate = true
-}
-
-function simplifyMaterial(source: THREE.Material) {
-  const std = source as THREE.MeshStandardMaterial
-  const next = new THREE.MeshStandardMaterial({
+function simplifyMaterial(_source: THREE.Material) {
+  // Lambert + no normal maps: ~310k tris stays orbit-friendly on integrated GPUs
+  return new THREE.MeshLambertMaterial({
     color: new THREE.Color('#ffffff'),
-    map: null,
-    normalMap: std.normalMap ?? null,
-    normalScale: std.normalScale?.clone() ?? new THREE.Vector2(1, 1),
-    roughness: std.roughness ?? 0.85,
-    metalness: 0,
-    side: THREE.DoubleSide,
-    envMapIntensity: 0.35,
+    side: THREE.FrontSide,
   })
-
-  if (next.normalMap) {
-    next.normalMap = next.normalMap.clone()
-    downscaleTexture(next.normalMap)
-  }
-
-  return next
 }
 
 function fitToUnitSize(root: THREE.Object3D) {
@@ -230,13 +190,11 @@ function GraphicLayer({
 }) {
   const texture = useTexture(graphic.url)
   const isDraggingGraphic = useMockupStore((s) => s.isDraggingGraphic)
+  const invalidate = useThree((s) => s.invalidate)
   const [hovered, setHovered] = useState(false)
   useCursor(hovered, 'grab', 'auto')
 
   const meshRef = useRef<THREE.Mesh>(null)
-  const needsProject = useRef(true)
-  const flatPreview = useRef(false)
-  const warmFrames = useRef(0)
 
   const geometry = useMemo(
     () => new THREE.PlaneGeometry(1, 1, PATCH_RES, PATCH_RES),
@@ -248,36 +206,17 @@ function GraphicLayer({
 
   useLayoutEffect(() => {
     texture.colorSpace = THREE.SRGBColorSpace
-    texture.anisotropy = 4
+    texture.anisotropy = 2
     texture.needsUpdate = true
   }, [texture])
 
+  // Flat preview while dragging — no raycasts (keeps orbit/drag responsive)
   useLayoutEffect(() => {
-    needsProject.current = true
-    warmFrames.current = 0
-  }, [
-    graphic.position.x,
-    graphic.position.y,
-    graphic.position.z,
-    graphic.scale,
-    graphic.rotation,
-    graphic.side,
-    bodyMeshes,
-  ])
-
-  useFrame(() => {
     const mesh = meshRef.current
-    const parent = groupRef.current
-    if (!mesh || !parent) return
+    if (!mesh) return
 
-    const draggingThis = isDraggingGraphic && isActive
-
-    // While dragging: flat preview (1 transform, no 49 raycasts)
-    if (draggingThis) {
-      if (!flatPreview.current) {
-        resetFlatPlane(geometry)
-        flatPreview.current = true
-      }
+    if (isDraggingGraphic && isActive) {
+      resetFlatPlane(geometry)
       mesh.position.set(
         graphic.position.x,
         graphic.position.y,
@@ -289,22 +228,57 @@ function GraphicLayer({
         graphic.rotation,
       )
       mesh.scale.setScalar(graphic.scale)
-      return
+      invalidate()
     }
+  }, [
+    isDraggingGraphic,
+    isActive,
+    graphic.position.x,
+    graphic.position.y,
+    graphic.position.z,
+    graphic.scale,
+    graphic.rotation,
+    graphic.side,
+    geometry,
+    invalidate,
+  ])
 
-    // After drag / on edit: project onto mold curvature
-    const warming = warmFrames.current < 6
-    if (warming) warmFrames.current += 1
+  // Project onto fabric curvature only when idle (after Center settles)
+  useLayoutEffect(() => {
+    if (isDraggingGraphic) return
 
-    if (!needsProject.current && !warming && !flatPreview.current) return
+    const mesh = meshRef.current
+    const parent = groupRef.current
+    if (!mesh || !parent) return
 
-    flatPreview.current = false
-    needsProject.current = false
-    mesh.position.set(0, 0, 0)
-    mesh.rotation.set(0, 0, 0)
-    mesh.scale.set(1, 1, 1)
-    projectPatchOntoShirt(geometry, parent, bodyMeshes, graphic)
-  })
+    let cancelled = false
+    const t = window.setTimeout(() => {
+      if (cancelled) return
+      mesh.position.set(0, 0, 0)
+      mesh.rotation.set(0, 0, 0)
+      mesh.scale.set(1, 1, 1)
+      projectPatchOntoShirt(geometry, parent, bodyMeshes, graphic)
+      invalidate()
+    }, 40)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [
+    isDraggingGraphic,
+    graphic.position.x,
+    graphic.position.y,
+    graphic.position.z,
+    graphic.scale,
+    graphic.rotation,
+    graphic.side,
+    graphic,
+    bodyMeshes,
+    geometry,
+    groupRef,
+    invalidate,
+  ])
 
   return (
     <mesh
@@ -312,7 +286,7 @@ function GraphicLayer({
       geometry={geometry}
       userData={{ graphicId: graphic.id }}
       renderOrder={20}
-      frustumCulled={false}
+      frustumCulled
       onPointerOver={(e) => {
         e.stopPropagation()
         setHovered(true)
@@ -353,7 +327,7 @@ function DragSystem({
   shirtRoot: THREE.Object3D
   dragApiRef: MutableRefObject<DragApi | null>
 }) {
-  const { camera, gl } = useThree()
+  const { camera, gl, invalidate } = useThree()
   const setIsDraggingGraphic = useMockupStore((s) => s.setIsDraggingGraphic)
   const selectGraphic = useMockupStore((s) => s.selectGraphic)
   const updateActiveGraphic = useMockupStore((s) => s.updateActiveGraphic)
@@ -370,13 +344,13 @@ function DragSystem({
     _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1
     _raycaster.setFromCamera(_ndc, camera)
 
-    let hit = _raycaster.intersectObjects(shirtMeshes.slice(0, 1), false)[0]
-    if (!hit) hit = _raycaster.intersectObjects(shirtMeshes, false)[0]
+    const hit = _raycaster.intersectObjects(shirtMeshes.slice(0, 1), false)[0]
     if (!hit) return
 
     const placed = placeFromHit(hit, parent)
     if (!placed) return
     updateActiveGraphic({ position: placed.position, side: placed.side })
+    invalidate()
   }
 
   useLayoutEffect(() => {
@@ -467,7 +441,7 @@ function ShirtMesh({ shirtId }: { shirtId: ShirtId }) {
       if (!mesh.isMesh || !mesh.visible) return
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
       for (const mat of mats) {
-        const std = mat as THREE.MeshStandardMaterial
+        const std = mat as THREE.MeshLambertMaterial
         if (std?.color) std.color.copy(tint)
       }
     })

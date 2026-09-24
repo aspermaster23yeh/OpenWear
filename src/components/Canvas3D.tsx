@@ -101,10 +101,9 @@ function Scene({
   return (
     <>
       <color attach="background" args={[studioBgColor]} />
-      <ambientLight intensity={0.7} />
-      <directionalLight position={[4, 6, 4]} intensity={1.15} />
-      <directionalLight position={[-3, 2, -2]} intensity={0.45} color="#a8c0ff" />
-      <hemisphereLight args={['#f0f4ff', '#1a120c', 0.35]} />
+      <ambientLight intensity={0.85} />
+      <directionalLight position={[3, 5, 4]} intensity={1.05} />
+      <directionalLight position={[-2, 1, -2]} intensity={0.35} />
 
       <Suspense fallback={<LoaderFallback />}>
         <Center key={shirtId}>
@@ -113,8 +112,8 @@ function Scene({
       </Suspense>
 
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.95, 0]} receiveShadow={false}>
-        <circleGeometry args={[1.6, 48]} />
-        <meshBasicMaterial color={floorColor} transparent opacity={0.55} />
+        <circleGeometry args={[1.4, 32]} />
+        <meshBasicMaterial color={floorColor} transparent opacity={0.5} />
       </mesh>
 
       <OrbitControls
@@ -122,7 +121,10 @@ function Scene({
         makeDefault
         enabled={!isDraggingGraphic}
         enableDamping
-        dampingFactor={0.08}
+        dampingFactor={0.12}
+        rotateSpeed={0.85}
+        zoomSpeed={0.9}
+        panSpeed={0.7}
         minDistance={1.2}
         maxDistance={5}
         minPolarAngle={0.2}
@@ -181,19 +183,21 @@ export const Canvas3D = forwardRef<Canvas3DHandle>(function Canvas3D(_, ref) {
   return (
     <Canvas
       className="h-full w-full touch-none"
-      dpr={[1, 1.5]}
+      dpr={1}
+      frameloop="demand"
       gl={{
         preserveDrawingBuffer: true,
         antialias: true,
         alpha: true,
         powerPreference: 'high-performance',
         failIfMajorPerformanceCaveat: false,
+        stencil: false,
+        depth: true,
       }}
       camera={{ position: [0.35, 0.35, 2.2], fov: 35, near: 0.1, far: 100 }}
       onCreated={({ gl }) => {
         gl.setClearColor(0x000000, 0)
-        const canvas = gl.domElement
-        canvas.addEventListener('webglcontextlost', (e) => {
+        gl.domElement.addEventListener('webglcontextlost', (e) => {
           e.preventDefault()
           console.warn('[Canvas3D] WebGL context lost — recarga la página')
         })
