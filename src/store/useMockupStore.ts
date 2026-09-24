@@ -58,7 +58,8 @@ export interface Graphic {
   id: string
   url: string
   name: string
-  position: { x: number; y: number }
+  /** Local position on the shirt group (set by drag / sliders). */
+  position: { x: number; y: number; z: number }
   scale: number
   rotation: number
   side: DecalSide
@@ -69,7 +70,7 @@ function createGraphic(partial: Partial<Graphic> & { url: string }): Graphic {
     id: partial.id ?? crypto.randomUUID(),
     url: partial.url,
     name: partial.name ?? 'Gráfico',
-    position: partial.position ?? { x: 0, y: 0.04 },
+    position: partial.position ?? { x: 0, y: 0.12, z: 0.26 },
     scale: partial.scale ?? 0.2,
     rotation: partial.rotation ?? 0,
     side: partial.side ?? 'front',
@@ -94,6 +95,7 @@ interface MockupState {
   cameraPreset: CameraPreset
   exportTransparent: boolean
   isDraggingFile: boolean
+  isDraggingGraphic: boolean
   studioBgId: StudioBgId
   studioBgColor: string
 
@@ -113,6 +115,7 @@ interface MockupState {
   setCameraPreset: (preset: CameraPreset) => void
   setExportTransparent: (value: boolean) => void
   setIsDraggingFile: (value: boolean) => void
+  setIsDraggingGraphic: (value: boolean) => void
   setStudioBgId: (id: StudioBgId) => void
   setStudioBgColor: (color: string) => void
   resetGraphics: () => void
@@ -128,6 +131,7 @@ export const useMockupStore = create<MockupState>((set, get) => ({
   cameraPreset: null,
   exportTransparent: false,
   isDraggingFile: false,
+  isDraggingGraphic: false,
   studioBgId: defaultBg.id,
   studioBgColor: defaultBg.color,
 
@@ -142,8 +146,9 @@ export const useMockupStore = create<MockupState>((set, get) => ({
       url,
       name: name ?? `Gráfico ${state.graphics.length + 1}`,
       position: {
-        x: (state.graphics.length % 3) * 0.04 - 0.04,
-        y: 0.04 - Math.floor(state.graphics.length / 3) * 0.05,
+        x: (state.graphics.length % 3) * 0.05 - 0.05,
+        y: 0.12 - Math.floor(state.graphics.length / 3) * 0.06,
+        z: 0.26,
       },
     })
 
@@ -200,7 +205,24 @@ export const useMockupStore = create<MockupState>((set, get) => ({
     })
   },
 
-  setActiveSide: (side) => get().updateActiveGraphic({ side }),
+  setActiveSide: (side) => {
+    const { activeGraphicId, graphics } = get()
+    if (!activeGraphicId) return
+    set({
+      graphics: graphics.map((g) => {
+        if (g.id !== activeGraphicId) return g
+        const z = Math.abs(g.position.z) || 0.26
+        return {
+          ...g,
+          side,
+          position: {
+            ...g.position,
+            z: side === 'front' ? z : -z,
+          },
+        }
+      }),
+    })
+  },
   setActivePosition: (position) => {
     const { activeGraphicId, graphics } = get()
     if (!activeGraphicId) return
@@ -218,6 +240,7 @@ export const useMockupStore = create<MockupState>((set, get) => ({
   setCameraPreset: (cameraPreset) => set({ cameraPreset }),
   setExportTransparent: (exportTransparent) => set({ exportTransparent }),
   setIsDraggingFile: (isDraggingFile) => set({ isDraggingFile }),
+  setIsDraggingGraphic: (isDraggingGraphic) => set({ isDraggingGraphic }),
   setStudioBgId: (studioBgId) => {
     if (studioBgId === 'custom') {
       set({ studioBgId })

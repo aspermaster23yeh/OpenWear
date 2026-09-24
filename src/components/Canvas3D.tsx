@@ -86,6 +86,7 @@ function Scene({
   const { gl, scene, camera } = useThree()
   const shirtId = useMockupStore((s) => s.shirtId)
   const studioBgColor = useMockupStore((s) => s.studioBgColor)
+  const isDraggingGraphic = useMockupStore((s) => s.isDraggingGraphic)
 
   useEffect(() => {
     onReady(gl, scene, camera)
@@ -119,6 +120,7 @@ function Scene({
       <OrbitControls
         ref={controlsRef}
         makeDefault
+        enabled={!isDraggingGraphic}
         enableDamping
         dampingFactor={0.08}
         minDistance={1.2}

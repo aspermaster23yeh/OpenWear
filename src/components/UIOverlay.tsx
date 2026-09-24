@@ -415,19 +415,22 @@ export function UIOverlay({
                   <SliderRow
                     label="Posición X"
                     value={active.position.x}
-                    min={-0.25}
-                    max={0.25}
+                    min={-0.45}
+                    max={0.45}
                     step={0.005}
                     onChange={(x) => setActivePosition({ x })}
                   />
                   <SliderRow
                     label="Posición Y"
                     value={active.position.y}
-                    min={-0.2}
-                    max={0.25}
+                    min={-0.45}
+                    max={0.55}
                     step={0.005}
                     onChange={(y) => setActivePosition({ y })}
                   />
+                  <p className="text-[11px] text-white/35">
+                    Arrastra el gráfico o la camiseta en el viewport para moverlo.
+                  </p>
                   <SliderRow
                     label="Escala"
                     value={active.scale}
@@ -508,7 +511,7 @@ export function UIOverlay({
           isLightBg ? 'text-[#0c0c0e]/40' : 'text-white/30'
         }`}
       >
-        Drag to orbit · Scroll zoom · Drop PNG to add
+        Drag to orbit · Drag graphic on shirt · Drop PNG to add
       </p>
     </>
   )
