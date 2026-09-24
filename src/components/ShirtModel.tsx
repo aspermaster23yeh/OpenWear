@@ -27,21 +27,26 @@ const HIDDEN_MESHES: Partial<Record<ShirtId, string[]>> = {
 }
 
 const TARGET_SIZE = 1.15
-/** Lift for projected (curved) vertices — tiny to hug fabric. */
-const LAYER_EPS = 0.0025
-/** Extra lift while dragging a flat preview so it never sinks into the mesh. */
-const DRAG_LIFT = 0.055
-const PATCH_RES = 6
+const LAYER_EPS = 0.003
+/** Projector starts this far along the normal before casting back onto fabric. */
+const PROJECTOR_PULL = 0.18
+const PATCH_RES = 5
 
 const _local = new THREE.Vector3()
 const _normal = new THREE.Vector3()
 const _origin = new THREE.Vector3()
 const _dir = new THREE.Vector3()
 const _ndc = new THREE.Vector2()
+const _tangent = new THREE.Vector3()
+const _bitangent = new THREE.Vector3()
+const _center = new THREE.Vector3()
+const _offset = new THREE.Vector3()
+const _quat = new THREE.Quaternion()
+const _up = new THREE.Vector3(0, 1, 0)
+const _tmp = new THREE.Vector3()
 const _raycaster = new THREE.Raycaster()
 
 function simplifyMaterial(_source: THREE.Material) {
-  // Lambert + no normal maps: ~310k tris stays orbit-friendly on integrated GPUs
   return new THREE.MeshLambertMaterial({
     color: new THREE.Color('#ffffff'),
     side: THREE.FrontSide,
@@ -77,7 +82,6 @@ function getBodyMeshes(root: THREE.Object3D) {
 function placeFromHit(
   hit: THREE.Intersection,
   parent: THREE.Object3D,
-  lift = LAYER_EPS,
 ): { position: { x: number; y: number; z: number }; side: 'front' | 'back' } | null {
   if (!hit.face) return null
 
@@ -91,7 +95,7 @@ function placeFromHit(
   if (side === 'front' && _normal.z < 0) _normal.negate()
   if (side === 'back' && _normal.z > 0) _normal.negate()
 
-  parent.worldToLocal(_local.copy(hit.point).addScaledVector(_normal, lift))
+  parent.worldToLocal(_local.copy(hit.point).addScaledVector(_normal, LAYER_EPS))
 
   return {
     position: { x: _local.x, y: _local.y, z: _local.z },
@@ -99,20 +103,11 @@ function placeFromHit(
   }
 }
 
-/** Reset subdivided plane to a flat unit square in XY. */
-function resetFlatPlane(geometry: THREE.PlaneGeometry) {
-  const pos = geometry.attributes.position
-  const uv = geometry.attributes.uv
-  for (let i = 0; i < pos.count; i++) {
-    pos.setXYZ(i, uv.getX(i) - 0.5, uv.getY(i) - 0.5, 0)
-  }
-  pos.needsUpdate = true
-  geometry.computeVertexNormals()
-}
-
 /**
- * Project every grid vertex onto the shirt so the graphic follows mold curvature.
- * Vertices end up in `parent` local space; mesh transform should be identity.
+ * Project the graphic in the surface tangent plane so:
+ * - size stays constant (no blow-up on the torso)
+ * - the patch wraps around fabric curvature
+ * Vertices are written in `parent` local space; mesh transform must stay identity.
  */
 function projectPatchOntoShirt(
   geometry: THREE.PlaneGeometry,
@@ -123,13 +118,48 @@ function projectPatchOntoShirt(
   if (!bodyMeshes.length) return
 
   parent.updateMatrixWorld(true)
-  const fromFront = graphic.side === 'front'
-  const cx = graphic.position.x
-  const cy = graphic.position.y
-  const cos = Math.cos(graphic.rotation)
-  const sin = Math.sin(graphic.rotation)
   const targets = bodyMeshes.slice(0, 1)
+  const fromFront = graphic.side === 'front'
 
+  // 1) Resolve center + normal on the fabric
+  _origin
+    .set(
+      graphic.position.x,
+      graphic.position.y,
+      fromFront ? 1.5 : -1.5,
+    )
+    .applyMatrix4(parent.matrixWorld)
+  _dir
+    .set(0, 0, fromFront ? -1 : 1)
+    .transformDirection(parent.matrixWorld)
+    .normalize()
+  _raycaster.set(_origin, _dir)
+  _raycaster.far = 4
+
+  const centerHit = _raycaster.intersectObjects(targets, false)[0]
+  if (!centerHit?.face) return
+
+  _center.copy(centerHit.point)
+  _normal
+    .copy(centerHit.face.normal)
+    .transformDirection(centerHit.object.matrixWorld)
+    .normalize()
+  if (fromFront && _normal.z < 0) _normal.negate()
+  if (!fromFront && _normal.z > 0) _normal.negate()
+
+  // 2) Tangent basis on the surface (world space), then rotate by graphic.rotation
+  _tangent.crossVectors(_up, _normal)
+  if (_tangent.lengthSq() < 1e-6) {
+    _tangent.set(1, 0, 0).cross(_normal)
+  }
+  _tangent.normalize()
+  _bitangent.crossVectors(_normal, _tangent).normalize()
+
+  _quat.setFromAxisAngle(_normal, graphic.rotation)
+  _tangent.applyQuaternion(_quat)
+  _bitangent.applyQuaternion(_quat)
+
+  const size = graphic.scale
   const pos = geometry.attributes.position
   const uv = geometry.attributes.uv
   let hits = 0
@@ -137,45 +167,51 @@ function projectPatchOntoShirt(
   for (let i = 0; i < pos.count; i++) {
     const u = uv.getX(i) - 0.5
     const v = uv.getY(i) - 0.5
-    const ru = u * cos - v * sin
-    const rv = u * sin + v * cos
-    const x = cx + ru * graphic.scale
-    const y = cy + rv * graphic.scale
 
-    _origin.set(x, y, fromFront ? 1.4 : -1.4).applyMatrix4(parent.matrixWorld)
-    _dir
-      .set(0, 0, fromFront ? -1 : 1)
-      .transformDirection(parent.matrixWorld)
-      .normalize()
+    // Point on the tangent plane in front of the fabric, then cast back along -normal
+    _offset
+      .copy(_tangent)
+      .multiplyScalar(u * size)
+      .addScaledVector(_bitangent, v * size)
+
+    _origin.copy(_center).add(_offset).addScaledVector(_normal, PROJECTOR_PULL)
+    _dir.copy(_normal).negate()
     _raycaster.set(_origin, _dir)
-    _raycaster.far = 4
+    _raycaster.far = PROJECTOR_PULL * 2.5
 
     const hit = _raycaster.intersectObjects(targets, false)[0]
-    if (hit?.face) {
+    if (hit) {
       hits++
-      _normal
-        .copy(hit.face.normal)
-        .transformDirection(hit.object.matrixWorld)
-        .normalize()
-      if (fromFront && _normal.z < 0) _normal.negate()
-      if (!fromFront && _normal.z > 0) _normal.negate()
-
       parent.worldToLocal(
         _local.copy(hit.point).addScaledVector(_normal, LAYER_EPS),
       )
       pos.setXYZ(i, _local.x, _local.y, _local.z)
     } else {
-      // Keep center depth if a corner misses (sleeve edge, etc.)
-      pos.setXYZ(i, x, y, graphic.position.z)
+      // Fallback: stay on the tangent plane (still correct size)
+      parent.worldToLocal(
+        _tmp.copy(_center).add(_offset).addScaledVector(_normal, LAYER_EPS),
+      )
+      pos.setXYZ(i, _tmp.x, _tmp.y, _tmp.z)
     }
   }
 
   pos.needsUpdate = true
   geometry.computeVertexNormals()
 
-  // If almost nothing hit, leave a flat card at the stored pose
-  if (hits < pos.count * 0.3) {
-    resetFlatPlane(geometry)
+  if (hits < 3) {
+    // Absolute fallback: flat card at stored pose, identity-sized then scaled via verts
+    for (let i = 0; i < pos.count; i++) {
+      const u = uv.getX(i) - 0.5
+      const v = uv.getY(i) - 0.5
+      pos.setXYZ(
+        i,
+        graphic.position.x + u * size,
+        graphic.position.y + v * size,
+        graphic.position.z,
+      )
+    }
+    pos.needsUpdate = true
+    geometry.computeVertexNormals()
   }
 }
 
@@ -199,6 +235,7 @@ function GraphicLayer({
   useCursor(hovered, 'grab', 'auto')
 
   const meshRef = useRef<THREE.Mesh>(null)
+  const rafRef = useRef(0)
 
   const geometry = useMemo(
     () => new THREE.PlaneGeometry(1, 1, PATCH_RES, PATCH_RES),
@@ -214,64 +251,28 @@ function GraphicLayer({
     texture.needsUpdate = true
   }, [texture])
 
-  // Flat preview while dragging — float above fabric (depthTest off + lift)
+  // Always the same projection path (real-time while dragging, throttled via rAF)
   useLayoutEffect(() => {
-    const mesh = meshRef.current
-    if (!mesh) return
-
-    if (isDraggingGraphic && isActive) {
-      resetFlatPlane(geometry)
-      // position already includes DRAG_LIFT from placeFromHit
-      mesh.position.set(
-        graphic.position.x,
-        graphic.position.y,
-        graphic.position.z,
-      )
-      mesh.rotation.set(
-        0,
-        graphic.side === 'front' ? 0 : Math.PI,
-        graphic.rotation,
-      )
-      mesh.scale.setScalar(graphic.scale)
-      invalidate()
-    }
-  }, [
-    isDraggingGraphic,
-    isActive,
-    graphic.position.x,
-    graphic.position.y,
-    graphic.position.z,
-    graphic.scale,
-    graphic.rotation,
-    graphic.side,
-    geometry,
-    invalidate,
-  ])
-
-  // Project onto fabric curvature only when idle (after Center settles)
-  useLayoutEffect(() => {
-    if (isDraggingGraphic) return
-
     const mesh = meshRef.current
     const parent = groupRef.current
     if (!mesh || !parent) return
 
-    let cancelled = false
-    const t = window.setTimeout(() => {
-      if (cancelled) return
+    // Only the active graphic reprojects every drag move; others wait until idle
+    if (isDraggingGraphic && !isActive) return
+
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(() => {
       mesh.position.set(0, 0, 0)
       mesh.rotation.set(0, 0, 0)
       mesh.scale.set(1, 1, 1)
       projectPatchOntoShirt(geometry, parent, bodyMeshes, graphic)
       invalidate()
-    }, 40)
+    })
 
-    return () => {
-      cancelled = true
-      window.clearTimeout(t)
-    }
+    return () => cancelAnimationFrame(rafRef.current)
   }, [
     isDraggingGraphic,
+    isActive,
     graphic.position.x,
     graphic.position.y,
     graphic.position.z,
@@ -284,8 +285,6 @@ function GraphicLayer({
     groupRef,
     invalidate,
   ])
-
-  const floating = isDraggingGraphic && isActive
 
   return (
     <mesh
@@ -307,7 +306,7 @@ function GraphicLayer({
       <meshBasicMaterial
         map={texture}
         transparent
-        depthTest={!floating}
+        depthTest
         depthWrite={false}
         polygonOffset
         polygonOffsetFactor={-8}
@@ -354,7 +353,7 @@ function DragSystem({
     const hit = _raycaster.intersectObjects(shirtMeshes.slice(0, 1), false)[0]
     if (!hit) return
 
-    const placed = placeFromHit(hit, parent, DRAG_LIFT)
+    const placed = placeFromHit(hit, parent)
     if (!placed) return
     updateActiveGraphic({ position: placed.position, side: placed.side })
     invalidate()
